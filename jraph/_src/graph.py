@@ -14,8 +14,10 @@
 # limitations under the License.
 """Graph Data Structures."""
 
-from typing import Any, NamedTuple, Iterable, Mapping, Union, Optional
+from dataclasses import dataclass, field
+from typing import Any, NamedTuple, Iterable, Mapping, Union, Optional, Dict
 import jax.numpy as jnp
+import numpy as np
 
 
 # As of 04/2020 pytype doesn't support recursive types.
@@ -97,10 +99,47 @@ class GraphsTuple(NamedTuple):
 
 
   """
+
   nodes: Optional[ArrayTree]
   edges: Optional[ArrayTree]
+  faces: Optional[ArrayTree]
   receivers: Optional[jnp.ndarray]  # with integer dtype
   senders: Optional[jnp.ndarray]  # with integer dtype
+
   globals: Optional[ArrayTree]
   n_node: jnp.ndarray  # with integer dtype
-  n_edge: jnp.ndarray   # with integer dtype
+  n_edge: jnp.ndarray  # with integer dtype
+
+
+
+
+
+class MeshGraphsTuple(NamedTuple):
+
+  """  Extension of GraphsTuple to tripartite network encoding regular triangulated mesh topologies.
+     Every edge functions simultaneously as connection between 2 vertices AND 2 faces. This relation is encoded in consistent
+      ordering of recivers-senders face_receivers-face_senders.
+      The correct order of vertices must be stored as a face property shaped [3,n_face]"""
+
+  nodes: Optional[ArrayTree]
+  edges: Optional[ArrayTree]
+  faces: Optional[ArrayTree]
+  receivers: Optional[jnp.ndarray]  # with integer dtype
+  senders: Optional[jnp.ndarray]  # with integer dtype
+  face_receivers: Optional[jnp.ndarray]
+  face_senders: Optional[jnp.ndarray]
+  face_edges: Optional[jnp.ndarray]
+  edge_face_index: Optional[jnp.ndarray]
+  globals: Optional[ArrayTree]
+  n_node: jnp.ndarray  # with integer dtype
+  n_edge: jnp.ndarray  # with integer dtype
+  n_face: jnp.ndarray
+  rng_key: Optional[jnp.ndarray]
+  n_node_max : int
+  n_edge_max: int
+
+  # -------------- Pickling support --------------
+
+
+
+

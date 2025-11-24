@@ -14,6 +14,9 @@
 # limitations under the License.
 """A library of Graph Neural Network models."""
 
+
+from frozendict import frozendict
+
 import functools
 from typing import Any, Callable, Iterable, Mapping, Optional, Union
 
@@ -28,13 +31,19 @@ from jraph._src import utils
 ArrayTree = Union[jnp.ndarray, Iterable['ArrayTree'], Mapping[Any, 'ArrayTree']]
 
 # All features will be an ArrayTree.
-NodeFeatures = EdgeFeatures = SenderFeatures = ReceiverFeatures = Globals = ArrayTree
+NodeFeatures = EdgeFeatures = SenderFeatures = ReceiverFeatures = FaceFeatures = FaceSenderFeatures = FaceReceiverFeatures = Globals = ArrayTree
 
 # Signature:
 # (edges of each node to be aggregated, segment ids, number of segments) ->
 # aggregated edges
 AggregateEdgesToNodesFn = Callable[
     [EdgeFeatures, jnp.ndarray, int], NodeFeatures]
+
+# Signature:
+# (edges of each face to be aggregated, segment ids, number of segments) ->
+# aggregated edges
+AggregateEdgesToFacesFn = Callable[
+    [EdgeFeatures, jnp.ndarray, int], FaceFeatures]
 
 # Signature:
 # (nodes of each graph to be aggregated, segment ids, number of segments) ->
@@ -48,6 +57,9 @@ AggregateNodesToGlobalsFn = Callable[[NodeFeatures, jnp.ndarray, int],
 AggregateEdgesToGlobalsFn = Callable[[EdgeFeatures, jnp.ndarray, int],
                                      Globals]
 
+
+AggregateFacesToGlobalsFn = Callable[[FaceFeatures, jnp.ndarray, int],
+                                     Globals]
 # Signature:
 # (edge features, sender node features, receiver node features, globals) ->
 # attention weights
@@ -69,6 +81,17 @@ AttentionNormalizeFn = Callable[[EdgeFeatures, jnp.ndarray, int], EdgeFeatures]
 GNUpdateEdgeFn = Callable[
     [EdgeFeatures, SenderFeatures, ReceiverFeatures, Globals], EdgeFeatures]
 
+
+MGNUpdateFaceFn = Callable[
+    [FaceFeatures, FaceSenderFeatures, FaceReceiverFeatures, Globals], FaceFeatures]
+
+# Signature:
+# (edge features, sender face features, receiver face features, globals) ->
+# updated edge features (from adjacent faces)
+MGNUpdateEdgeFromFaceFn = Callable[
+    [EdgeFeatures, FaceSenderFeatures, FaceReceiverFeatures, Globals], EdgeFeatures]
+
+
 # Signature:
 # (node features, outgoing edge features, incoming edge features,
 #  globals) -> updated node features
@@ -76,6 +99,475 @@ GNUpdateNodeFn = Callable[
     [NodeFeatures, SenderFeatures, ReceiverFeatures, Globals], NodeFeatures]
 
 GNUpdateGlobalFn = Callable[[NodeFeatures, EdgeFeatures, Globals], Globals]
+
+
+def MeshGraphNetwork(
+    update_edge_fn: Optional[GNUpdateEdgeFn],
+    update_face_fn: Optional[MGNUpdateFaceFn],
+    update_edge_from_face_fn: Optional[MGNUpdateEdgeFromFaceFn],
+    update_node_fn: Optional[GNUpdateNodeFn],
+    update_global_fn: Optional[GNUpdateGlobalFn] = None,
+    aggregate_edges_for_nodes_fn: AggregateEdgesToNodesFn = utils.segment_sum,
+    aggregate_edges_for_faces_fn: AggregateEdgesToFacesFn = utils.segment_sum,
+    aggregate_nodes_for_globals_fn: AggregateNodesToGlobalsFn = utils
+    .segment_sum,
+    aggregate_edges_for_globals_fn: AggregateEdgesToGlobalsFn = utils
+    .segment_sum,
+    aggregate_faces_for_globals_fn: AggregateFacesToGlobalsFn = utils.segment_sum,
+    attention_logit_fn: Optional[AttentionLogitFn] = None,
+    attention_normalize_fn: Optional[AttentionNormalizeFn] = utils
+    .segment_softmax,
+    attention_reduce_fn: Optional[AttentionReduceFn] = None):
+  """Returns a method that applies a configured GraphNetwork.
+
+  This implementation follows Algorithm 1 in https://arxiv.org/abs/1806.01261
+
+  There is one difference. For the nodes update the class aggregates over the
+  sender edges and receiver edges separately. This is a bit more general
+  than the algorithm described in the paper. The original behaviour can be
+  recovered by using only the receiver edge aggregations for the update.
+
+  In addition this implementation supports softmax attention over incoming
+  edge features.
+
+  Example usage::
+
+    gn = GraphNetwork(update_edge_function,
+    update_node_function, **kwargs)
+    # Conduct multiple rounds of message passing with the same parameters:
+    for _ in range(num_message_passing_steps):
+      graph = gn(graph)
+
+  Args:
+    update_edge_fn: function used to update the edges or None to deactivate edge
+      updates.
+    update_node_fn: function used to update the nodes or None to deactivate node
+      updates.
+    update_global_fn: function used to update the globals or None to deactivate
+      globals updates.
+    aggregate_edges_for_nodes_fn: function used to aggregate messages to each
+      node.
+    aggregate_nodes_for_globals_fn: function used to aggregate the nodes for the
+      globals.
+    aggregate_edges_for_globals_fn: function used to aggregate the edges for the
+      globals.
+    attention_logit_fn: function used to calculate the attention weights or
+      None to deactivate attention mechanism.
+    attention_normalize_fn: function used to normalize raw attention logits or
+      None if attention mechanism is not active.
+    attention_reduce_fn: function used to apply weights to the edge features or
+      None if attention mechanism is not active.
+
+  Returns:
+    A method that applies the configured GraphNetwork.
+  """
+  not_both_supplied = lambda x, y: (x != y) and ((x is None) or (y is None))
+  if not_both_supplied(attention_reduce_fn, attention_logit_fn):
+    raise ValueError(('attention_logit_fn and attention_reduce_fn must both be'
+                      ' supplied.'))
+
+  def _ApplyMeshGraphNet(graph):
+    """Applies a configured GraphNetwork to a graph.
+
+    This implementation follows Algorithm 1 in https://arxiv.org/abs/1806.01261
+
+    There is one difference. For the nodes update the class aggregates over the
+    sender edges and receiver edges separately. This is a bit more general
+    the algorithm described in the paper. The original behaviour can be
+    recovered by using only the receiver edge aggregations for the update.
+
+    In addition this implementation supports softmax attention over incoming
+    edge features.
+
+    Many popular Graph Neural Networks can be implemented as special cases of
+    GraphNets, for more information please see the paper.
+
+    Args:
+      graph: a `GraphsTuple` containing the graph.
+
+    Returns:
+      Updated `GraphsTuple`.
+    """
+    # pylint: disable=g-long-lambda
+    nodes, edges, faces, receivers, senders,face_receivers,face_senders,face_edges,edge_face_index, globals_, n_node, n_edge, n_face,rng_key,n_node_max,n_edge_max= graph
+    # Equivalent to jnp.sum(n_node), but jittable
+    sum_n_node = tree.tree_leaves(nodes)[0].shape[0]
+    sum_n_face = tree.tree_leaves(faces)[0].shape[0]
+    sum_n_edge = senders.shape[0]
+    if not tree.tree_all(
+        tree.tree_map(lambda n: n.shape[0] == sum_n_node, nodes)):
+      raise ValueError(
+          'All node arrays in nest must contain the same number of nodes.')
+
+    if not tree.tree_all(
+        tree.tree_map(lambda n: n.shape[0] == sum_n_face, faces)):
+      raise ValueError(
+          'All face arrays in nest must contain the same number of faces.')
+
+    sent_attributes = tree.tree_map(lambda n: n[senders], nodes)
+    received_attributes = tree.tree_map(lambda n: n[receivers], nodes)
+
+    # Here we scatter the global features to the corresponding edges,
+    # giving us tensors of shape [num_edges, global_feat].
+    global_edge_attributes = tree.tree_map(lambda g: jnp.repeat(
+        g, n_edge, axis=0, total_repeat_length=sum_n_edge), globals_)
+
+    if update_edge_fn:
+      edges = update_edge_fn(edges, sent_attributes, received_attributes,
+                             global_edge_attributes)
+
+    if update_face_fn:
+       # sent_face_attributes = tree.tree_map(
+       #     lambda e: aggregate_edges_for_faces_fn(e, face_senders, sum_n_face), edges)
+        received_edge_attributes = tree.tree_map(lambda n: n[face_edges], edges)
+       #     lambda e: aggregate_edges_for_faces_fn(e, face_receivers, sum_n_face),
+       #     edges)
+        # Here we scatter the global features to the corresponding nodes,
+        # giving us tensors of shape [num_nodes, global_feat].
+        global_attributes = tree.tree_map(lambda g: jnp.repeat(
+            g, n_face, axis=0, total_repeat_length=sum_n_face), globals_)
+        faces = update_face_fn(faces,received_edge_attributes,global_attributes)
+
+    if update_edge_from_face_fn:
+      sent_face_attributes = tree.tree_map(lambda n: n[face_senders], faces)
+      received_face_attributes = tree.tree_map(lambda n: n[face_receivers], faces)
+      edges = update_edge_from_face_fn(edges, sent_face_attributes, received_face_attributes,edge_face_index,
+                             global_edge_attributes)
+
+    if attention_logit_fn:
+      logits = attention_logit_fn(edges, sent_attributes, received_attributes,
+                                  global_edge_attributes)
+      tree_calculate_weights = functools.partial(
+          attention_normalize_fn,
+          segment_ids=receivers,
+          num_segments=sum_n_node)
+      weights = tree.tree_map(tree_calculate_weights, logits)
+      edges = attention_reduce_fn(edges, weights)
+
+    if update_node_fn:
+      sent_attributes = tree.tree_map(
+          lambda e: aggregate_edges_for_nodes_fn(e, senders, sum_n_node), edges)
+      received_attributes = tree.tree_map(
+          lambda e: aggregate_edges_for_nodes_fn(e, receivers, sum_n_node),
+          edges)
+      # Here we scatter the global features to the corresponding nodes,
+      # giving us tensors of shape [num_nodes, global_feat].
+      global_attributes = tree.tree_map(lambda g: jnp.repeat(
+          g, n_node, axis=0, total_repeat_length=sum_n_node), globals_)
+      nodes = update_node_fn(nodes, sent_attributes,
+                             received_attributes, global_attributes)
+
+    if update_global_fn:
+      n_graph = n_node.shape[0]
+      graph_idx = jnp.arange(n_graph)
+      # To aggregate nodes and edges from each graph to global features,
+      # we first construct tensors that map the node to the corresponding graph.
+      # For example, if you have `n_node=[1,2]`, we construct the tensor
+      # [0, 1, 1]. We then do the same for edges.
+      node_gr_idx = jnp.repeat(
+          graph_idx, n_node, axis=0, total_repeat_length=sum_n_node)
+      edge_gr_idx = jnp.repeat(
+          graph_idx, n_edge, axis=0, total_repeat_length=sum_n_edge)
+      face_gr_idx = jnp.repeat(
+          graph_idx, n_face, axis=0, total_repeat_length=sum_n_face)
+
+      # We use the aggregation function to pool the nodes/edges per graph.
+      node_attributes = tree.tree_map(
+          lambda n: aggregate_nodes_for_globals_fn(n, node_gr_idx, n_graph),
+          nodes)
+      edge_attribtutes = tree.tree_map(
+          lambda e: aggregate_edges_for_globals_fn(e, edge_gr_idx, n_graph),
+          edges)
+      face_attribtutes = tree.tree_map(
+          lambda e: aggregate_faces_for_globals_fn(e, face_gr_idx, n_graph),
+          faces)
+      # These pooled nodes are the inputs to the global update fn.
+      globals_ = update_global_fn(node_attributes, edge_attribtutes,face_attribtutes, globals_)
+    # pylint: enable=g-long-lambda
+    return gn_graph.MeshGraphsTuple(
+        nodes=nodes,
+        edges=edges,
+        faces=faces,
+        receivers=receivers,
+        senders=senders,
+        face_receivers=face_receivers,
+        face_senders=face_senders,
+        face_edges=face_edges,
+        edge_face_index=edge_face_index,
+        globals=globals_,
+        n_node=n_node,
+        n_edge=n_edge,
+        n_face=n_face,
+    rng_key=rng_key,
+    n_node_max=n_node_max,
+    n_edge_max=n_edge_max)
+
+  return _ApplyMeshGraphNet
+
+
+
+def MeshGraphNetworkFlip(
+    update_edge_fn: Optional[GNUpdateEdgeFn],
+update_edge_flip_selection_fn: Optional[GNUpdateEdgeFn],
+    update_face_fn: Optional[MGNUpdateFaceFn],
+    update_edge_from_face_fn: Optional[MGNUpdateEdgeFromFaceFn],
+    update_node_fn: Optional[GNUpdateNodeFn],
+    update_global_fn: Optional[GNUpdateGlobalFn] = None,
+    aggregate_edges_for_nodes_fn: AggregateEdgesToNodesFn = utils.segment_sum,
+    aggregate_edges_for_faces_fn: AggregateEdgesToFacesFn = utils.segment_sum,
+    aggregate_nodes_for_globals_fn: AggregateNodesToGlobalsFn = utils
+    .segment_sum,
+        aggregate_edges_for_nodes_rflood_fn =utils.segment_min,
+    aggregate_edges_for_globals_fn: AggregateEdgesToGlobalsFn = utils
+    .segment_sum,
+    aggregate_faces_for_globals_fn: AggregateFacesToGlobalsFn = utils.segment_sum,
+    attention_logit_fn: Optional[AttentionLogitFn] = None,
+    attention_normalize_fn: Optional[AttentionNormalizeFn] = utils
+    .segment_softmax,
+    attention_reduce_fn: Optional[AttentionReduceFn] = None,
+rng_key: Optional[jax.Array] = None,
+        n_node_max:int=None,
+        n_edge_max:int=None,
+):
+
+
+
+
+  """Returns a method that applies a configured GraphNetwork.
+
+  This implementation follows Algorithm 1 in https://arxiv.org/abs/1806.01261
+
+  There is one difference. For the nodes update the class aggregates over the
+  sender edges and receiver edges separately. This is a bit more general
+  than the algorithm described in the paper. The original behaviour can be
+  recovered by using only the receiver edge aggregations for the update.
+
+  In addition this implementation supports softmax attention over incoming
+  edge features.
+
+  Example usage::
+
+    gn = GraphNetwork(update_edge_function,
+    update_node_function, **kwargs)
+    # Conduct multiple rounds of message passing with the same parameters:
+    for _ in range(num_message_passing_steps):
+      graph = gn(graph)
+
+  Args:
+    update_edge_fn: function used to update the edges or None to deactivate edge
+      updates.
+    update_node_fn: function used to update the nodes or None to deactivate node
+      updates.
+    update_global_fn: function used to update the globals or None to deactivate
+      globals updates.
+    aggregate_edges_for_nodes_fn: function used to aggregate messages to each
+      node.
+    aggregate_nodes_for_globals_fn: function used to aggregate the nodes for the
+      globals.
+    aggregate_edges_for_globals_fn: function used to aggregate the edges for the
+      globals.
+    attention_logit_fn: function used to calculate the attention weights or
+      None to deactivate attention mechanism.
+    attention_normalize_fn: function used to normalize raw attention logits or
+      None if attention mechanism is not active.
+    attention_reduce_fn: function used to apply weights to the edge features or
+      None if attention mechanism is not active.
+
+  Returns:
+    A method that applies the configured GraphNetwork.
+  """
+
+
+  not_both_supplied = lambda x, y: (x != y) and ((x is None) or (y is None))
+  if not_both_supplied(attention_reduce_fn, attention_logit_fn):
+    raise ValueError(('attention_logit_fn and attention_reduce_fn must both be'
+                      ' supplied.'))
+
+
+
+  def _ApplyMeshGraphNetFlip(graph,n_node,n_edge):
+
+
+    """Applies a configured GraphNetwork to a graph.
+
+    This implementation follows Algorithm 1 in https://arxiv.org/abs/1806.01261
+
+    There is one difference. For the nodes update the class aggregates over the
+    sender edges and receiver edges separately. This is a bit more general
+    the algorithm described in the paper. The original behaviour can be
+    recovered by using only the receiver edge aggregations for the update.
+
+    In addition this implementation supports softmax attention over incoming
+    edge features.
+
+    Many popular Graph Neural Networks can be implemented as special cases of
+    GraphNets, for more information please see the paper.
+
+    Args:
+      graph: a `GraphsTuple` containing the graph.
+
+    Returns:
+      Updated `GraphsTuple`.
+    """
+
+
+
+    # Example: generate a single random vector
+
+
+
+
+    # pylint: disable=g-long-lambda
+    nodes, edges, faces, receivers, senders,face_receivers,face_senders,face_edges,edge_face_index, globals_, n_node, n_edge, n_face,rng_key,_,_= graph
+    # Equivalent to jnp.sum(n_node), but
+
+    rng_key, rng_sample = jax.random.split(rng_key)
+
+
+    rn = jax.random.uniform(rng_sample, shape=(n_edge_max,))
+
+    edges=frozendict({**edges,"rn":rn})
+
+    rng_key, rng_sample = jax.random.split(rng_key)
+    rn = jax.random.uniform(rng_sample, shape=(n_node_max,))
+
+    nodes=frozendict({**nodes,"rn":rn,"rn_min":rn})
+
+
+
+    sum_n_node = tree.tree_leaves(nodes)[0].shape[0]
+    sum_n_face = tree.tree_leaves(faces)[0].shape[0]
+    sum_n_edge = senders.shape[0]
+    if not tree.tree_all(
+        tree.tree_map(lambda n: n.shape[0] == sum_n_node, nodes)):
+      raise ValueError(
+          'All node arrays in nest must contain the same number of nodes.')
+
+    if not tree.tree_all(
+        tree.tree_map(lambda n: n.shape[0] == sum_n_face, faces)):
+      raise ValueError(
+          'All face arrays in nest must contain the same number of faces.')
+
+    sent_attributes = tree.tree_map(lambda n: n[senders], nodes)
+    received_attributes = tree.tree_map(lambda n: n[receivers], nodes)
+
+    # Here we scatter the global features to the corresponding edges,
+    # giving us tensors of shape [num_edges, global_feat].
+    global_edge_attributes = tree.tree_map(lambda g: jnp.repeat(
+        g, n_edge, axis=0, total_repeat_length=sum_n_edge), globals_)
+
+    if update_edge_fn:
+      edges = update_edge_fn(edges, sent_attributes, received_attributes,
+                             global_edge_attributes)
+
+    if update_node_fn:
+      sent_attributes = tree.tree_map(
+          lambda e: aggregate_edges_for_nodes_rflood_fn(e, senders, sum_n_node), edges)
+      received_attributes = tree.tree_map(
+          lambda e: aggregate_edges_for_nodes_rflood_fn(e, receivers, sum_n_node),
+          edges)
+      # Here we scatter the global features to the corresponding nodes,
+      # giving us tensors of shape [num_nodes, global_feat].
+      global_attributes = tree.tree_map(lambda g: jnp.repeat(
+          g, n_node, axis=0, total_repeat_length=sum_n_node), globals_)
+      nodes = update_node_fn(nodes, sent_attributes,
+                             received_attributes, global_attributes)
+
+  #  sent_attributes = tree.tree_map(lambda n: n[senders], nodes)
+   # received_attributes = tree.tree_map(lambda n: n[receivers], nodes)
+
+    # Here we scatter the global features to the corresponding edges,
+    # giving us tensors of shape [num_edges, global_feat].
+   # global_edge_attributes = tree.tree_map(lambda g: jnp.repeat(
+   #     g, n_edge, axis=0, total_repeat_length=sum_n_edge), globals_)
+
+   # if update_edge_fn:
+   #     edges = update_edge_fn(edges, sent_attributes, received_attributes,
+   #                            global_edge_attributes)
+
+    #if update_node_fn:
+   #   sent_attributes = tree.tree_map(
+    #      lambda e: aggregate_edges_for_nodes_rflood_fn(e, senders, sum_n_node), edges)
+    #  received_attributes = tree.tree_map(
+    #      lambda e: aggregate_edges_for_nodes_rflood_fn(e, receivers, sum_n_node),
+    #      edges)
+      # Here we scatter the global features to the corresponding nodes,
+      # giving us tensors of shape [num_nodes, global_feat].
+    #  global_attributes = tree.tree_map(lambda g: jnp.repeat(
+    #      g, n_node, axis=0, total_repeat_length=sum_n_node), globals_)
+    #  nodes = update_node_fn(nodes, sent_attributes,
+    #                         received_attributes, global_attributes)
+
+
+    nodes=frozendict({**nodes,"flip_site":jnp.where(nodes["rn"]==nodes["rn_min"],1,0)})
+    nodes = frozendict({**nodes, "rn_min_edge": jnp.where(nodes["flip_site"] == 0, jnp.inf, nodes["rn_min_edge"])})
+
+    #masked_nodes = tree.tree_map(lambda n: jnp.where(nodes["flip_site"] == 0, jnp.inf, n), nodes)
+    #jnp.where(nodes["flip_site"] == 0, jnp.inf, n)
+    sent_attributes = tree.tree_map(lambda n: n[senders], nodes)
+    received_attributes = tree.tree_map(lambda n: n[receivers], nodes)
+
+    # Here we scatter the global features to the corresponding edges,
+    # giving us tensors of shape [num_edges, global_feat].
+    global_edge_attributes = tree.tree_map(lambda g: jnp.repeat(
+        g, n_edge, axis=0, total_repeat_length=sum_n_edge), globals_)
+
+    if update_edge_flip_selection_fn:
+        edges = update_edge_flip_selection_fn(edges, sent_attributes, received_attributes,
+                               global_edge_attributes)
+
+    j
+    nodes=frozendict(**nodes,"flip_site")
+
+
+    if update_global_fn:
+      n_graph = n_node.shape[0]
+      graph_idx = jnp.arange(n_graph)
+      # To aggregate nodes and edges from each graph to global features,
+      # we first construct tensors that map the node to the corresponding graph.
+      # For example, if you have `n_node=[1,2]`, we construct the tensor
+      # [0, 1, 1]. We then do the same for edges.
+      node_gr_idx = jnp.repeat(
+          graph_idx, n_node, axis=0, total_repeat_length=sum_n_node)
+      edge_gr_idx = jnp.repeat(
+          graph_idx, n_edge, axis=0, total_repeat_length=sum_n_edge)
+      face_gr_idx = jnp.repeat(
+          graph_idx, n_face, axis=0, total_repeat_length=sum_n_face)
+
+      # We use the aggregation function to pool the nodes/edges per graph.
+      node_attributes = tree.tree_map(
+          lambda n: aggregate_nodes_for_globals_fn(n, node_gr_idx, n_graph),
+          nodes)
+      edge_attribtutes = tree.tree_map(
+          lambda e: aggregate_edges_for_globals_fn(e, edge_gr_idx, n_graph),
+          edges)
+      face_attribtutes = tree.tree_map(
+          lambda e: aggregate_faces_for_globals_fn(e, face_gr_idx, n_graph),
+          faces)
+      # These pooled nodes are the inputs to the global update fn.
+      globals_ = update_global_fn(node_attributes, edge_attribtutes,face_attribtutes, globals_)
+    # pylint: enable=g-long-lambda
+    return gn_graph.MeshGraphsTuple(
+        nodes=nodes,
+        edges=edges,
+        faces=faces,
+        receivers=receivers,
+        senders=senders,
+        face_receivers=face_receivers,
+        face_senders=face_senders,
+        face_edges=face_edges,
+        edge_face_index=edge_face_index,
+        globals=globals_,
+        n_node=n_node,
+        n_edge=n_edge,
+        n_face=n_face,
+        rng_key=rng_key,
+    n_node_max=n_node_max,
+    n_edge_max=n_edge_max)
+
+  return lambda n: _ApplyMeshGraphNetFlip(n,n_node_max,n_edge_max)
+
+
 
 
 def GraphNetwork(
@@ -236,6 +728,7 @@ def GraphNetwork(
         n_edge=n_edge)
 
   return _ApplyGraphNet
+
 
 
 InteractionUpdateNodeFn = Callable[

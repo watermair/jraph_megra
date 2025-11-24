@@ -1,0 +1,17 @@
+jax>=0.1.55
+jaxlib>=0.1.37
+numpy>=1.18.0
+
+[examples]
+dm-haiku>=0.0.2
+absl-py>=0.9
+frozendict>=2.0.2
+optax>=0.0.1
+scipy>=1.2.1
+
+[ogb_examples]
+dm-haiku>=0.0.2
+absl-py>=0.9
+optax>=0.0.1
+pandas>=1.0.5
+dm-tree>=0.1.5
