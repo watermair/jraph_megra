@@ -123,13 +123,19 @@ class MeshGraphsTuple(NamedTuple):
 
   nodes: Optional[ArrayTree]
   edges: Optional[ArrayTree]
+  edges_topo: Optional[ArrayTree]
   faces: Optional[ArrayTree]
   receivers: Optional[jnp.ndarray]  # with integer dtype
   senders: Optional[jnp.ndarray]  # with integer dtype
   face_receivers: Optional[jnp.ndarray]
   face_senders: Optional[jnp.ndarray]
-  face_edges: Optional[jnp.ndarray]
-  edge_face_index: Optional[jnp.ndarray]
+  #face_receivers_prev: Optional[jnp.ndarray]
+  #face_receivers_next: Optional[jnp.ndarray]
+  #face_senders_prev: Optional[jnp.ndarray]
+  #face_senders_prev: Optional[jnp.ndarray]
+  face_vertices: Optional[jnp.ndarray]
+  #face_edges: Optional[jnp.ndarray]
+  #edge_face_index: Optional[jnp.ndarray]
   globals: Optional[ArrayTree]
   n_node: jnp.ndarray  # with integer dtype
   n_edge: jnp.ndarray  # with integer dtype

@@ -85,6 +85,9 @@ GNUpdateEdgeFn = Callable[
 MGNUpdateFaceFn = Callable[
     [FaceFeatures, FaceSenderFeatures, FaceReceiverFeatures, Globals], FaceFeatures]
 
+
+#MGNFlipEdgeFn = Callable[
+#    [FaceFeatures, FaceSenderFeatures, FaceReceiverFeatures, Globals], FaceFeatures]
 # Signature:
 # (edge features, sender face features, receiver face features, globals) ->
 # updated edge features (from adjacent faces)
@@ -189,7 +192,7 @@ def MeshGraphNetwork(
       Updated `GraphsTuple`.
     """
     # pylint: disable=g-long-lambda
-    nodes, edges, faces, receivers, senders,face_receivers,face_senders,face_edges,edge_face_index, globals_, n_node, n_edge, n_face,rng_key,n_node_max,n_edge_max= graph
+    nodes, edges,edges_topo, faces, receivers, senders,face_receivers,face_senders,face_vertices, globals_, n_node, n_edge, n_face,rng_key,n_node_max,n_edge_max= graph
     # Equivalent to jnp.sum(n_node), but jittable
     sum_n_node = tree.tree_leaves(nodes)[0].shape[0]
     sum_n_face = tree.tree_leaves(faces)[0].shape[0]
@@ -213,7 +216,7 @@ def MeshGraphNetwork(
         g, n_edge, axis=0, total_repeat_length=sum_n_edge), globals_)
 
     if update_edge_fn:
-      edges = update_edge_fn(edges, sent_attributes, received_attributes,
+      edges = update_edge_fn(edges,edges_topo, sent_attributes, received_attributes,
                              global_edge_attributes)
 
     if update_face_fn:
@@ -287,13 +290,13 @@ def MeshGraphNetwork(
     return gn_graph.MeshGraphsTuple(
         nodes=nodes,
         edges=edges,
+        edges_topo=edges_topo,
         faces=faces,
         receivers=receivers,
         senders=senders,
         face_receivers=face_receivers,
         face_senders=face_senders,
-        face_edges=face_edges,
-        edge_face_index=edge_face_index,
+        face_vertices=face_vertices,
         globals=globals_,
         n_node=n_node,
         n_edge=n_edge,
@@ -313,6 +316,7 @@ update_edge_flip_selection_fn: Optional[GNUpdateEdgeFn],
     update_edge_from_face_fn: Optional[MGNUpdateEdgeFromFaceFn],
     update_node_fn: Optional[GNUpdateNodeFn],
     update_global_fn: Optional[GNUpdateGlobalFn] = None,
+    flip_edge_fn = None,
     aggregate_edges_for_nodes_fn: AggregateEdgesToNodesFn = utils.segment_sum,
     aggregate_edges_for_faces_fn: AggregateEdgesToFacesFn = utils.segment_sum,
     aggregate_nodes_for_globals_fn: AggregateNodesToGlobalsFn = utils
@@ -418,9 +422,11 @@ rng_key: Optional[jax.Array] = None,
 
 
     # pylint: disable=g-long-lambda
-    nodes, edges, faces, receivers, senders,face_receivers,face_senders,face_edges,edge_face_index, globals_, n_node, n_edge, n_face,rng_key,_,_= graph
+    nodes, edges,edges_topo, faces, receivers, senders,face_receivers,face_senders,face_vertices, globals_, n_node, n_edge, n_face,rng_key,_,_= graph
     # Equivalent to jnp.sum(n_node), but
-
+    face_vertices=faces["vertices"]
+    face_edges=faces["edges"]
+    face_orient=faces["edge_orientation"]
     rng_key, rng_sample = jax.random.split(rng_key)
 
 
@@ -431,7 +437,7 @@ rng_key: Optional[jax.Array] = None,
     rng_key, rng_sample = jax.random.split(rng_key)
     rn = jax.random.uniform(rng_sample, shape=(n_node_max,))
 
-    nodes=frozendict({**nodes,"rn":rn,"rn_min":rn})
+    nodes=frozendict({**nodes,"rn":rn,"rn_min":rn,"flip_id":jnp.zeros((n_node_max))})
 
 
 
@@ -473,30 +479,30 @@ rng_key: Optional[jax.Array] = None,
       nodes = update_node_fn(nodes, sent_attributes,
                              received_attributes, global_attributes)
 
-  #  sent_attributes = tree.tree_map(lambda n: n[senders], nodes)
-   # received_attributes = tree.tree_map(lambda n: n[receivers], nodes)
+    sent_attributes = tree.tree_map(lambda n: n[senders], nodes)
+    received_attributes = tree.tree_map(lambda n: n[receivers], nodes)
 
-    # Here we scatter the global features to the corresponding edges,
+   #  Here we scatter the global features to the corresponding edges,
     # giving us tensors of shape [num_edges, global_feat].
-   # global_edge_attributes = tree.tree_map(lambda g: jnp.repeat(
-   #     g, n_edge, axis=0, total_repeat_length=sum_n_edge), globals_)
+    global_edge_attributes = tree.tree_map(lambda g: jnp.repeat(
+        g, n_edge, axis=0, total_repeat_length=sum_n_edge), globals_)
 
-   # if update_edge_fn:
-   #     edges = update_edge_fn(edges, sent_attributes, received_attributes,
-   #                            global_edge_attributes)
+    if update_edge_fn:
+        edges = update_edge_fn(edges, sent_attributes, received_attributes,
+                               global_edge_attributes)
 
-    #if update_node_fn:
-   #   sent_attributes = tree.tree_map(
-    #      lambda e: aggregate_edges_for_nodes_rflood_fn(e, senders, sum_n_node), edges)
-    #  received_attributes = tree.tree_map(
-    #      lambda e: aggregate_edges_for_nodes_rflood_fn(e, receivers, sum_n_node),
-    #      edges)
+    if update_node_fn:
+      sent_attributes = tree.tree_map(
+          lambda e: aggregate_edges_for_nodes_rflood_fn(e, senders, sum_n_node), edges)
+      received_attributes = tree.tree_map(
+          lambda e: aggregate_edges_for_nodes_rflood_fn(e, receivers, sum_n_node),
+          edges)
       # Here we scatter the global features to the corresponding nodes,
       # giving us tensors of shape [num_nodes, global_feat].
-    #  global_attributes = tree.tree_map(lambda g: jnp.repeat(
-    #      g, n_node, axis=0, total_repeat_length=sum_n_node), globals_)
-    #  nodes = update_node_fn(nodes, sent_attributes,
-    #                         received_attributes, global_attributes)
+      global_attributes = tree.tree_map(lambda g: jnp.repeat(
+          g, n_node, axis=0, total_repeat_length=sum_n_node), globals_)
+      nodes = update_node_fn(nodes, sent_attributes,
+                             received_attributes, global_attributes)
 
 
     nodes=frozendict({**nodes,"flip_site":jnp.where(nodes["rn"]==nodes["rn_min"],1,0)})
@@ -516,8 +522,40 @@ rng_key: Optional[jax.Array] = None,
         edges = update_edge_flip_selection_fn(edges, sent_attributes, received_attributes,
                                global_edge_attributes)
 
-    j
-    nodes=frozendict(**nodes,"flip_site")
+
+    if flip_edge_fn:
+        (senders,
+        receivers,
+        face_senders,
+        face_receivers,
+        face_edges,
+        face_vertices,
+        face_orient)=flip_edge_fn(senders, receivers,  # [n_edge]
+        face_senders, face_receivers,  # [n_edge] (adjacent face idx or -1)
+        face_edges,  # [n_face, 3] unique edge ids (ordered)
+        face_vertices,  # [n_face, 3] vertex ids in CCW order
+        face_orient,  # [n_face, 3] +1/-1 per local edge vs face order
+        edges["flip_site"])  # [n_edge] boolean or {0,1}
+
+        faces = frozendict({
+            "edge_orientation": face_orient,
+            "vertices": face_vertices,
+            "edges": face_edges,
+        })
+
+        print(face_vertices.shape, face_edges.shape,face_orient)
+
+        #senders,receivers,face_senders, face_receivers,face_edges, face_vertices,faces, edges, nodes = flip_edge_fn(
+        #    senders, receivers,  # [n_edge]
+        #    face_senders, face_receivers,  # [n_edge] -> two adjacent faces per edge
+        #    face_edges,  # [n_face,3] edge ids ordered to match face_vertices
+        #    face_vertices,  # [n_face,3] vertex ids in CCW order
+        #    faces["edge_orientation"],  # [n_face,3] +1/-1 orientation
+        #    nodes, edges, faces,
+        #    n_edge_max  # static integer: max number of flips to consider
+        #)
+    #j
+    #nodes=frozendict(**nodes,"flip_site")
 
 
     if update_global_fn:
@@ -555,8 +593,8 @@ rng_key: Optional[jax.Array] = None,
         senders=senders,
         face_receivers=face_receivers,
         face_senders=face_senders,
-        face_edges=face_edges,
-        edge_face_index=edge_face_index,
+        face_vertices=face_vertices,
+
         globals=globals_,
         n_node=n_node,
         n_edge=n_edge,
