@@ -143,6 +143,7 @@ class MeshGraphsTuple(NamedTuple):
   rng_key: Optional[jnp.ndarray]
   n_node_max : int
   n_edge_max: int
+  n_face_max:int
 
   # -------------- Pickling support --------------
 
