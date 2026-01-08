@@ -123,7 +123,7 @@ class MeshGraphsTuple(NamedTuple):
 
   nodes: Optional[ArrayTree]
   edges: Optional[ArrayTree]
-  edges_topo: Optional[ArrayTree]
+
   faces: Optional[ArrayTree]
   receivers: Optional[jnp.ndarray]  # with integer dtype
   senders: Optional[jnp.ndarray]  # with integer dtype

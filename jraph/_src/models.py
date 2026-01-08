@@ -192,7 +192,7 @@ def MeshGraphNetwork(
       Updated `GraphsTuple`.
     """
     # pylint: disable=g-long-lambda
-    nodes, edges,edges_topo, faces, receivers, senders,face_receivers,face_senders,face_vertices, globals_, n_node, n_edge, n_face,rng_key,n_node_max,n_edge_max,n_face_max= graph
+    nodes, edges, faces, receivers, senders,face_receivers,face_senders,face_vertices, globals_, n_node, n_edge, n_face,rng_key,n_node_max,n_edge_max,n_face_max= graph
     # Equivalent to jnp.sum(n_node), but jittable
     face_edges=faces["edges"]
     face_vertices=faces["vertices"]
@@ -218,7 +218,7 @@ def MeshGraphNetwork(
         g, n_edge, axis=0, total_repeat_length=sum_n_edge), globals_)
 
     if update_edge_fn:
-      edges = update_edge_fn(edges,edges_topo, sent_attributes, received_attributes,
+      edges = update_edge_fn(edges, sent_attributes, received_attributes,
                              global_edge_attributes)
 
     if update_face_fn:
@@ -298,7 +298,6 @@ def MeshGraphNetwork(
     return gn_graph.MeshGraphsTuple(
         nodes=nodes,
         edges=edges,
-        edges_topo=edges_topo,
         faces=faces,
         receivers=receivers,
         senders=senders,
@@ -322,7 +321,7 @@ def MeshGraphNetworkFlip(
     update_edge_selection_fn: Optional[GNUpdateEdgeFn],
 update_node_selection_fn: Optional[GNUpdateNodeFn],
 
-update_edge_flip_selection_fn: Optional[GNUpdateEdgeFn],
+update_face_preselection_fn: Optional[GNUpdateEdgeFn],
 update_face_selection_fn=None,
         update_edge_from_face_selection_fn=None,
     update_global_fn: Optional[GNUpdateGlobalFn]=None,
@@ -443,10 +442,10 @@ rng_key: Optional[jax.Array] = None,
 
 
     # pylint: disable=g-long-lambda
-    nodes, edges,edges_topo, faces, receivers, senders,face_receivers,face_senders,face_vertices, globals_, n_node, n_edge, n_face,rng_key,_,_,_= graph
+    nodes, edges, faces, receivers, senders,face_receivers,face_senders,face_vertices, globals_, n_node, n_edge, n_face,rng_key,_,_,_= graph
 
     face_edges = faces["edges"]
-
+    node_neighbors=nodes["neighbors"]
 
     # Equivalent to jnp.sum(n_node), but
     rng_key, rng_sample = jax.random.split(rng_key)
@@ -454,14 +453,17 @@ rng_key: Optional[jax.Array] = None,
 
     rn = jax.random.uniform(rng_sample, shape=(n_edge_max,))
 
-    edges=frozendict({**edges,"rn":rn})
+    rng_key, rng_sample = jax.random.split(rng_key)
+
+   # edges=frozendict({**edges,"rn":rn})
 
     #rng_key, rng_sample = jax.random.split(rng_key)
     #rn = jax.random.uniform(rng_sample, shape=(n_edge_max,))
 
     #nodes=frozendict({**nodes,"rn":rn,"rn_min":rn,"flip_id":jnp.zeros((n_node_max))})
     edges = frozendict({**edges, "rn": rn, "rn_min": rn})
-
+    faces = frozendict({**faces, "rn_min": jnp.ones(n_face_max)*jnp.inf})
+    nodes = frozendict({**nodes, "rn_min": jnp.ones(n_node_max)*jnp.inf})
 
     sum_n_node = tree.tree_leaves(nodes)[0].shape[0]
     sum_n_face = tree.tree_leaves(faces)[0].shape[0]
@@ -479,65 +481,49 @@ rng_key: Optional[jax.Array] = None,
 
 
 
-    if update_face_selection_fn:
-       # sent_face_attributes = tree.tree_map(
-       #     lambda e: aggregate_edges_for_faces_fn(e, face_senders, sum_n_face), edges)
-
+    if update_face_preselection_fn:
+        # sent_face_attributes = tree.tree_map(
+        #     lambda e: aggregate_edges_for_faces_fn(e, face_senders, sum_n_face), edges)
 
         received_edge_attributes = tree.tree_map(lambda n: n[face_edges], edges)
-       #     lambda e: aggregate_edges_for_faces_fn(e, face_receivers, sum_n_face),
-       #     edges)
+        #     lambda e: aggregate_edges_for_faces_fn(e, face_receivers, sum_n_face),
+        #     edges)
         # Here we scatter the global features to the corresponding nodes,
         # giving us tensors of shape [num_nodes, global_feat].
-      #  f = jnp.arange(face_edges.shape[0])[:, None]  # [n_faces, 1]
-        #e = face_edges  # [n_faces, 3]
-
+        #  f = jnp.arange(face_edges.shape[0])[:, None]  # [n_faces, 1]
+        # e = face_edges  # [n_faces, 3]
 
         global_attributes = tree.tree_map(lambda g: jnp.repeat(
             g, n_face, axis=0, total_repeat_length=sum_n_face), globals_)
 
+        faces = update_face_preselection_fn(faces, received_edge_attributes, global_attributes)
 
-        faces = update_face_selection_fn(faces,received_edge_attributes,global_attributes)
-
-    sent_face_attributes = tree.tree_map(lambda n: n[face_senders], nodes)
-    received_face_attributes = tree.tree_map(lambda n: n[face_receivers], nodes)
+    sent_face_attributes = tree.tree_map(lambda n: n[face_senders], faces)
+    received_face_attributes = tree.tree_map(lambda n: n[face_receivers], faces)
 
     global_edge_attributes = tree.tree_map(lambda g: jnp.repeat(
         g, n_edge, axis=0, total_repeat_length=sum_n_edge), globals_)
+
     if update_edge_from_face_selection_fn:
       sent_face_attributes = tree.tree_map(lambda n: n[face_senders], faces)
       received_face_attributes = tree.tree_map(lambda n: n[face_receivers], faces)
-      edges = update_edge_from_face_selection_fn(edges, sent_face_attributes, received_face_attributes,
-                             global_edge_attributes)
+      edges = update_edge_from_face_selection_fn(edges, sent_face_attributes, received_face_attributes,global_edge_attributes)
 
 
+    rn = jax.random.uniform(rng_sample, shape=(n_edge_max,))
+    flip_candidates=edges["flip_site"].copy()
+    edges = frozendict({**edges, "rn": jnp.where(flip_candidates,rn,jnp.ones(n_edge_max)*jnp.inf), "rn_min": jnp.where(flip_candidates,rn,jnp.ones(n_edge_max)*jnp.inf)})
+    faces = frozendict({**faces, "rn_min": jnp.ones(n_face_max) * jnp.inf})
+    nodes = frozendict({**nodes, "rn_min": jnp.ones(n_node_max) * jnp.inf})
+    edges = frozendict({**edges, "flip_site": jnp.zeros((n_edge_max,), dtype=jnp.int32)})
 
-    if update_face_selection_fn:
-       # sent_face_attributes = tree.tree_map(
-       #     lambda e: aggregate_edges_for_faces_fn(e, face_senders, sum_n_face), edges)
-
-
-        received_edge_attributes = tree.tree_map(lambda n: n[face_edges], edges)
-       #     lambda e: aggregate_edges_for_faces_fn(e, face_receivers, sum_n_face),
-       #     edges)
-        # Here we scatter the global features to the corresponding nodes,
-        # giving us tensors of shape [num_nodes, global_feat].
-      #  f = jnp.arange(face_edges.shape[0])[:, None]  # [n_faces, 1]
-        #e = face_edges  # [n_faces, 3]
-
-
-        global_attributes = tree.tree_map(lambda g: jnp.repeat(
-            g, n_face, axis=0, total_repeat_length=sum_n_face), globals_)
-
-
-        faces = update_face_selection_fn(faces,received_edge_attributes,global_attributes)
 
     if update_node_selection_fn:
         sent_attributes = tree.tree_map(
             # lambda e: aggregate_edges_for_nodes_rflood_fn(e, senders, sum_n_node), edges)
-            lambda e: aggregate_edges_for_nodes_fn(e, senders, sum_n_node), edges)
+            lambda e: aggregate_edges_for_nodes_rflood_fn(e, senders, sum_n_node), edges)
         received_attributes = tree.tree_map(
-            lambda e: aggregate_edges_for_nodes_fn(e, receivers, sum_n_node),
+            lambda e: aggregate_edges_for_nodes_rflood_fn(e, receivers, sum_n_node),
             edges)
         # Here we scatter the global features to the corresponding nodes,
         # giving us tensors of shape [num_nodes, global_feat].
@@ -546,35 +532,232 @@ rng_key: Optional[jax.Array] = None,
         nodes = update_node_selection_fn(nodes, sent_attributes,
                                          received_attributes, global_attributes)
 
+    if update_face_selection_fn:
+        # sent_face_attributes = tree.tree_map(
+        #     lambda e: aggregate_edges_for_faces_fn(e, face_senders, sum_n_face), edges)
+
+        received_edge_attributes = tree.tree_map(lambda n: n[face_edges], edges)
+        #     lambda e: aggregate_edges_for_faces_fn(e, face_receivers, sum_n_face),
+        #     edges)
+        # Here we scatter the global features to the corresponding nodes,
+        # giving us tensors of shape [num_nodes, global_feat].
+        #  f = jnp.arange(face_edges.shape[0])[:, None]  # [n_faces, 1]
+        # e = face_edges  # [n_faces, 3]
+
+        global_attributes = tree.tree_map(lambda g: jnp.repeat(
+            g, n_face, axis=0, total_repeat_length=sum_n_face), globals_)
+
+        faces = update_face_selection_fn(faces, face_edges,nodes,senders,receivers, global_attributes)
+
+    sent_face_attributes = tree.tree_map(lambda n: n[face_senders], faces)
+    received_face_attributes = tree.tree_map(lambda n: n[face_receivers], faces)
+
+    global_edge_attributes = tree.tree_map(lambda g: jnp.repeat(
+        g, n_edge, axis=0, total_repeat_length=sum_n_edge), globals_)
+
+    if update_edge_from_face_selection_fn:
+      sent_face_attributes = tree.tree_map(lambda n: n[face_senders], faces)
+      received_face_attributes = tree.tree_map(lambda n: n[face_receivers], faces)
+      edges = update_edge_from_face_selection_fn(edges, sent_face_attributes, received_face_attributes,global_edge_attributes)
+
+
+    if update_node_selection_fn:
+        sent_attributes = tree.tree_map(
+            # lambda e: aggregate_edges_for_nodes_rflood_fn(e, senders, sum_n_node), edges)
+            lambda e: aggregate_edges_for_nodes_rflood_fn(e, senders, sum_n_node), edges)
+        received_attributes = tree.tree_map(
+            lambda e: aggregate_edges_for_nodes_rflood_fn(e, receivers, sum_n_node),
+            edges)
+        # Here we scatter the global features to the corresponding nodes,
+        # giving us tensors of shape [num_nodes, global_feat].
+        global_attributes = tree.tree_map(lambda g: jnp.repeat(
+            g, n_node, axis=0, total_repeat_length=sum_n_node), globals_)
+        nodes = update_node_selection_fn(nodes, sent_attributes,
+                                         received_attributes, global_attributes)
+
+
     sent_attributes = tree.tree_map(lambda n: n[senders], nodes)
     received_attributes = tree.tree_map(lambda n: n[receivers], nodes)
 
-    sent_face_attributes = tree.tree_map(lambda n: n[face_senders], nodes)
-    received_face_attributes = tree.tree_map(lambda n: n[face_receivers], nodes)
+ #   sent_face_attributes = tree.tree_map(lambda n: n[face_senders], faces)
+ #   received_face_attributes = tree.tree_map(lambda n: n[face_receivers], faces)
 
     # Here we scatter the global features to the corresponding edges,
     # giving us tensors of shape [num_edges, global_feat].
     global_edge_attributes = tree.tree_map(lambda g: jnp.repeat(
         g, n_edge, axis=0, total_repeat_length=sum_n_edge), globals_)
-    if update_edge_flip_selection_fn:
-        edges = update_edge_selection_fn(edges, sent_attributes, received_attributes,
-                                              global_edge_attributes)
+
+    if update_edge_selection_fn:
+        edges = update_edge_selection_fn(edges, sent_attributes, received_attributes,  global_edge_attributes)
+
+
+    sent_attributes = tree.tree_map(
+        # lambda e: aggregate_edges_for_nodes_rflood_fn(e, senders, sum_n_node), edges)
+        lambda e: aggregate_edges_for_nodes_rflood_fn(e, senders, sum_n_node), edges)
+    received_attributes = tree.tree_map(
+        lambda e: aggregate_edges_for_nodes_rflood_fn(e, receivers, sum_n_node),
+        edges)
+    # Here we scatter the global features to the corresponding nodes,
+    # giving us tensors of shape [num_nodes, global_feat].
+    global_attributes = tree.tree_map(lambda g: jnp.repeat(
+        g, n_node, axis=0, total_repeat_length=sum_n_node), globals_)
+    nodes = update_node_selection_fn(nodes, sent_attributes,
+                                     received_attributes, global_attributes)
 
     sent_attributes = tree.tree_map(lambda n: n[senders], nodes)
     received_attributes = tree.tree_map(lambda n: n[receivers], nodes)
 
-    sent_face_attributes = tree.tree_map(lambda n: n[face_senders], nodes)
-    received_face_attributes = tree.tree_map(lambda n: n[face_receivers], nodes)
-
-    if update_edge_flip_selection_fn:
-        edges = update_edge_flip_selection_fn(edges, sent_attributes, received_attributes,sent_face_attributes,received_face_attributes,
-                             global_edge_attributes)
+    global_edge_attributes = tree.tree_map(lambda g: jnp.repeat(
+        g, n_edge, axis=0, total_repeat_length=sum_n_edge), globals_)
+    edges = update_edge_selection_fn(edges, sent_attributes, received_attributes, global_edge_attributes)
 
 
+    flip_mask=edges["rn"]==edges["rn_min"]
+
+
+   # if update_edge_flip_selection_fn:
+   #     edges = update_edge_flip_selection_fn(edges, sent_attributes, received_attributes,sent_face_attributes,received_face_attributes,
+   #                          global_edge_attributes)
+
+   # flip_mask=flip_candidates
+
+    from jax import lax
 
 
 
-    K = n_edge_max // 10
+    def mis_kring_edges(
+            senders,
+            receivers,
+            num_nodes,
+            key,
+            K=4,
+            max_iters=8,
+    ):
+
+        import jax
+        import jax.numpy as jnp
+        from jax import lax
+        """
+        Luby-style MIS for edges with STRICT K-ring exclusion.
+        Frontier-based expansion (non-idempotent).
+
+        Parameters
+        ----------
+        senders, receivers : (E,) int
+            Edge endpoints
+        num_nodes : int
+            Number of vertices
+        key : PRNGKey
+        K : int
+            Ring depth (now meaningful)
+        max_iters : int
+            Luby iterations
+
+        Returns
+        -------
+        selected : (E,) bool
+            Maximal independent edge set
+        """
+
+        E = senders.shape[0]
+
+        # -------------------------------------------------
+        # E -> V -> E (1 expansion step)
+        # -------------------------------------------------
+        def ev_step(edge_mask):
+            v = jnp.zeros(num_nodes, dtype=bool)
+            v = v.at[senders].max(edge_mask)
+            v = v.at[receivers].max(edge_mask)
+            return v[senders] | v[receivers]
+
+        # -------------------------------------------------
+        # STRICT K-ring expansion using frontier tracking
+        # -------------------------------------------------
+        def block_kring_strict(seed_edges):
+            blocked = seed_edges
+            frontier = seed_edges
+
+            def body(carry, _):
+                blocked, frontier = carry
+                expanded = ev_step(frontier)
+                new = expanded & (~blocked)
+                blocked = blocked | new
+                frontier = new
+                return (blocked, frontier), None
+
+            (blocked, _), _ = lax.scan(
+                body,
+                (blocked, frontier),
+                None,
+                length=K,
+            )
+            return blocked
+
+        # -------------------------------------------------
+        # One Luby iteration
+        # -------------------------------------------------
+        def luby_step(carry, key):
+            active, selected = carry
+
+            key, subkey = jax.random.split(key)
+            priority = jax.random.uniform(subkey, (E,))
+            priority = jnp.where(active, priority, -jnp.inf)
+
+            # local maxima (1-ring)
+            v = jnp.full(num_nodes, -jnp.inf)
+            v = v.at[senders].max(priority)
+            v = v.at[receivers].max(priority)
+
+            edge_max = jnp.maximum(v[senders], v[receivers])
+            choose = active & (priority == edge_max)
+
+            # strict K-ring block
+            blocked = block_kring_strict(choose)
+
+            active = active & (~blocked)
+            selected = selected | choose
+
+            return (active, selected), key
+
+        # -------------------------------------------------
+        # Run MIS iterations
+        # -------------------------------------------------
+        active0 = jnp.ones(E, dtype=bool)
+        selected0 = jnp.zeros(E, dtype=bool)
+
+        keys = jax.random.split(key, max_iters)
+
+        (active, selected), _ = lax.scan(
+            luby_step,
+            (active0, selected0),
+            keys,
+        )
+
+        return selected
+
+    flip_mask = jnp.int32(mis_kring_edges(
+        senders=senders,
+        receivers=receivers,
+        num_nodes=n_node_max,
+        key=rng_key,
+        K=2,  # 4-ring exclusion
+        max_iters=20,  # usually enough
+    ))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    K =  n_edge_max // 10
 
     def extract_flip_edges(flip_mask, K):
         # get candidate flip edges (possibly padded)
@@ -588,13 +771,29 @@ rng_key: Optional[jax.Array] = None,
 
         return flip_edges, safe_edges, valid
 
-   # flip_mask=mis_2ring(senders,receivers,face_senders,face_receivers,rng_key)
 
 
-    flip_edges,safe_edges,valid = extract_flip_edges(edges['flip_site'],K)
-    #flip_edges, safe_edges, valid = extract_flip_edges(flip_mask, K)
+   # flip_mask = luby_mis_flip_mask(
+   #     senders, receivers,
+   #     face_senders, face_receivers,
+   #     edges["flip_site"],
+   #     rng_key)
 
+  #  flip_mask = independent_flip_mask(
+  #      senders, receivers,
+  #      face_senders, face_receivers,
+  #      edges["flip_site"], K
+  #  )
 
+    #flip_mask=flip_candidates & edges["flip_site"]
+   # flip_edges,safe_edges,valid = extract_flip_edges(edges["flip_site"],K)
+    flip_edges, safe_edges, valid = extract_flip_edges(flip_mask, K)
+
+    #flip_edges=select_independent_flips(senders, receivers,
+    #face_senders, face_receivers, face_edges,
+    #flip_edges)
+
+   # flip_edges = flip_edges[:1]
 
     if flip_edge_fn:
         #priority = jax.random.uniform(rng_sample, shape=(n_edge_max,))
@@ -615,13 +814,117 @@ rng_key: Optional[jax.Array] = None,
         #    "faces_packed":faces_packed
         #})
 
-        senders, receivers, faces, face_senders, face_receivers, aggregate = flip_edge_fn(
+        def apply_flips_serial(
+                senders,
+                receivers,
+                faces,
+                face_senders,
+                face_receivers,
+                flip_edges,  # (K,)
+                node_neighbors,
+        ):
+            import jax
+            import jax.numpy as jnp
+
+            """
+            Serially apply edge flips in a JAX-safe way.
+
+            Returns:
+                aggregate : (K, 7) int32
+                    One row per entry in flip_edges (matches vectorized version).
+                    Rows are -1 for sentinel edges (e < 0).
+            """
+
+            # Shape must match flip_edge_fn aggregate output
+            dummy_agg = jnp.full((1, 7), -1, dtype=jnp.int32)
+
+            def body(state, e):
+                (
+                    senders,
+                    receivers,
+                    faces,
+                    fs,
+                    fr,
+                    node_neighbors,
+                ) = state
+
+                def do_flip():
+                    return flip_edge_fn(
+                        senders,
+                        receivers,
+                        faces,
+                        fs,
+                        fr,
+                        jnp.array([e], dtype=jnp.int32),  # K = 1
+                        node_neighbors,
+                    )
+
+                def no_flip():
+                    return (
+                        senders,
+                        receivers,
+                        faces,
+                        fs,
+                        fr,
+                        dummy_agg,
+                        node_neighbors,
+                    )
+
+                (
+                    senders2,
+                    receivers2,
+                    faces2,
+                    fs2,
+                    fr2,
+                    aggregate2,  # (1, 7)
+                    node_neighbors2,
+                ) = jax.lax.cond(e >= 0, do_flip, no_flip)
+
+                # Carry updated mesh state
+                new_state = (
+                    senders2,
+                    receivers2,
+                    faces2,
+                    fs2,
+                    fr2,
+                    node_neighbors2,
+                )
+
+                # Output aggregate row for this step
+                return new_state, aggregate2[0]
+
+            init_state = (
+                senders,
+                receivers,
+                faces,
+                face_senders,
+                face_receivers,
+                node_neighbors,
+            )
+
+            (
+                (senders, receivers, faces, face_senders, face_receivers, node_neighbors),
+                aggregate,  # (K, 7)
+            ) = jax.lax.scan(body, init_state, flip_edges)
+
+            return (
+                senders,
+                receivers,
+                faces,
+                face_senders,
+                face_receivers,
+                aggregate,
+                node_neighbors,
+            )
+
+        senders, receivers, faces, face_senders, face_receivers, aggregate,node_neighbors = apply_flips_serial(
             senders,
             receivers,
             faces,
             face_senders,
             face_receivers,
             flip_edges,
+            node_neighbors
         )
 
         def per_flip_energy_sum(node_energy, edge_energy, face_energy, aggregate):
@@ -641,6 +944,8 @@ rng_key: Optional[jax.Array] = None,
             return E_nodes + E_edge + E_faces  # (K,)
 
     energy_before=per_flip_energy_sum(nodes["energy"],edges['energy'],faces['energy'],aggregate)
+
+
 
 
 
@@ -671,7 +976,7 @@ rng_key: Optional[jax.Array] = None,
             g, n_edge, axis=0, total_repeat_length=sum_n_edge), globals_)
 
         if update_edge_local_fn:
-            edges = update_edge_local_fn(edges, edges_topo, sent_attributes, received_attributes,
+            edges = update_edge_local_fn(edges,  sent_attributes, received_attributes,
                                    edge_mask,global_edge_attributes)
 
         if update_face_local_fn:
@@ -713,25 +1018,26 @@ rng_key: Optional[jax.Array] = None,
 
         energy_after = per_flip_energy_sum(nodes["energy"], edges['energy'], faces['energy'], aggregate)
 
-        flip_edges=metropolis_fn(flip_edges,
+        flip_edges,accepted_fraction,rng_key=metropolis_fn(flip_edges,
             energy_before,
             energy_after,
-            10000,
+            10,
             rng_key,
         )
 
 
-        senders, receivers, faces, face_senders, face_receivers, aggregate = flip_edge_fn(
+        senders, receivers, faces, face_senders, face_receivers, aggregate, node_neighbors= apply_flips_serial(
             senders,
             receivers,
             faces,
             face_senders,
             face_receivers,
             flip_edges,
+            node_neighbors
         )
 
 
-    globals_=frozendict({**globals_,"rejected":jnp.sum(energy_after)})
+    globals_=frozendict({**globals_,"flips_per":jnp.sum(flip_mask)/n_edge_max,"flips_acc":accepted_fraction,"E_b":jnp.sum(energy_before),"E_a":jnp.sum(energy_after)})
 
 
 
@@ -739,7 +1045,7 @@ rng_key: Optional[jax.Array] = None,
 
 
 
-
+    #edges=frozendict({**edges,"flip_site":flip_mask})
 
        # print(face_vertices.shape, face_edges.shape,face_orient)
 
@@ -786,7 +1092,6 @@ rng_key: Optional[jax.Array] = None,
     return gn_graph.MeshGraphsTuple(
         nodes=nodes,
         edges=edges,
-        edges_topo=edges_topo,
         faces=faces,
         receivers=receivers,
         senders=senders,
