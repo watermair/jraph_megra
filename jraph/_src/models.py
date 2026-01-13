@@ -464,7 +464,7 @@ rng_key: Optional[jax.Array] = None,
     edges = frozendict({**edges, "rn": rn, "rn_min": rn})
     faces = frozendict({**faces, "rn_min": jnp.ones(n_face_max)*jnp.inf})
     nodes = frozendict({**nodes, "rn_min": jnp.ones(n_node_max)*jnp.inf})
-
+    flip_mask = edges["rn"] == edges["rn_min"]
     sum_n_node = tree.tree_leaves(nodes)[0].shape[0]
     sum_n_face = tree.tree_leaves(faces)[0].shape[0]
     sum_n_edge = senders.shape[0]
@@ -509,110 +509,10 @@ rng_key: Optional[jax.Array] = None,
       received_face_attributes = tree.tree_map(lambda n: n[face_receivers], faces)
       edges = update_edge_from_face_selection_fn(edges, sent_face_attributes, received_face_attributes,global_edge_attributes)
 
-
-    rn = jax.random.uniform(rng_sample, shape=(n_edge_max,))
-    flip_candidates=edges["flip_site"].copy()
-    edges = frozendict({**edges, "rn": jnp.where(flip_candidates,rn,jnp.ones(n_edge_max)*jnp.inf), "rn_min": jnp.where(flip_candidates,rn,jnp.ones(n_edge_max)*jnp.inf)})
-    faces = frozendict({**faces, "rn_min": jnp.ones(n_face_max) * jnp.inf})
-    nodes = frozendict({**nodes, "rn_min": jnp.ones(n_node_max) * jnp.inf})
-    edges = frozendict({**edges, "flip_site": jnp.zeros((n_edge_max,), dtype=jnp.int32)})
+    flip_mask = edges["rn"] == edges["rn_min"]
 
 
-    if update_node_selection_fn:
-        sent_attributes = tree.tree_map(
-            # lambda e: aggregate_edges_for_nodes_rflood_fn(e, senders, sum_n_node), edges)
-            lambda e: aggregate_edges_for_nodes_rflood_fn(e, senders, sum_n_node), edges)
-        received_attributes = tree.tree_map(
-            lambda e: aggregate_edges_for_nodes_rflood_fn(e, receivers, sum_n_node),
-            edges)
-        # Here we scatter the global features to the corresponding nodes,
-        # giving us tensors of shape [num_nodes, global_feat].
-        global_attributes = tree.tree_map(lambda g: jnp.repeat(
-            g, n_node, axis=0, total_repeat_length=sum_n_node), globals_)
-        nodes = update_node_selection_fn(nodes, sent_attributes,
-                                         received_attributes, global_attributes)
-
-    if update_face_selection_fn:
-        # sent_face_attributes = tree.tree_map(
-        #     lambda e: aggregate_edges_for_faces_fn(e, face_senders, sum_n_face), edges)
-
-        received_edge_attributes = tree.tree_map(lambda n: n[face_edges], edges)
-        #     lambda e: aggregate_edges_for_faces_fn(e, face_receivers, sum_n_face),
-        #     edges)
-        # Here we scatter the global features to the corresponding nodes,
-        # giving us tensors of shape [num_nodes, global_feat].
-        #  f = jnp.arange(face_edges.shape[0])[:, None]  # [n_faces, 1]
-        # e = face_edges  # [n_faces, 3]
-
-        global_attributes = tree.tree_map(lambda g: jnp.repeat(
-            g, n_face, axis=0, total_repeat_length=sum_n_face), globals_)
-
-        faces = update_face_selection_fn(faces, face_edges,nodes,senders,receivers, global_attributes)
-
-    sent_face_attributes = tree.tree_map(lambda n: n[face_senders], faces)
-    received_face_attributes = tree.tree_map(lambda n: n[face_receivers], faces)
-
-    global_edge_attributes = tree.tree_map(lambda g: jnp.repeat(
-        g, n_edge, axis=0, total_repeat_length=sum_n_edge), globals_)
-
-    if update_edge_from_face_selection_fn:
-      sent_face_attributes = tree.tree_map(lambda n: n[face_senders], faces)
-      received_face_attributes = tree.tree_map(lambda n: n[face_receivers], faces)
-      edges = update_edge_from_face_selection_fn(edges, sent_face_attributes, received_face_attributes,global_edge_attributes)
-
-
-    if update_node_selection_fn:
-        sent_attributes = tree.tree_map(
-            # lambda e: aggregate_edges_for_nodes_rflood_fn(e, senders, sum_n_node), edges)
-            lambda e: aggregate_edges_for_nodes_rflood_fn(e, senders, sum_n_node), edges)
-        received_attributes = tree.tree_map(
-            lambda e: aggregate_edges_for_nodes_rflood_fn(e, receivers, sum_n_node),
-            edges)
-        # Here we scatter the global features to the corresponding nodes,
-        # giving us tensors of shape [num_nodes, global_feat].
-        global_attributes = tree.tree_map(lambda g: jnp.repeat(
-            g, n_node, axis=0, total_repeat_length=sum_n_node), globals_)
-        nodes = update_node_selection_fn(nodes, sent_attributes,
-                                         received_attributes, global_attributes)
-
-
-    sent_attributes = tree.tree_map(lambda n: n[senders], nodes)
-    received_attributes = tree.tree_map(lambda n: n[receivers], nodes)
-
- #   sent_face_attributes = tree.tree_map(lambda n: n[face_senders], faces)
- #   received_face_attributes = tree.tree_map(lambda n: n[face_receivers], faces)
-
-    # Here we scatter the global features to the corresponding edges,
-    # giving us tensors of shape [num_edges, global_feat].
-    global_edge_attributes = tree.tree_map(lambda g: jnp.repeat(
-        g, n_edge, axis=0, total_repeat_length=sum_n_edge), globals_)
-
-    if update_edge_selection_fn:
-        edges = update_edge_selection_fn(edges, sent_attributes, received_attributes,  global_edge_attributes)
-
-
-    sent_attributes = tree.tree_map(
-        # lambda e: aggregate_edges_for_nodes_rflood_fn(e, senders, sum_n_node), edges)
-        lambda e: aggregate_edges_for_nodes_rflood_fn(e, senders, sum_n_node), edges)
-    received_attributes = tree.tree_map(
-        lambda e: aggregate_edges_for_nodes_rflood_fn(e, receivers, sum_n_node),
-        edges)
-    # Here we scatter the global features to the corresponding nodes,
-    # giving us tensors of shape [num_nodes, global_feat].
-    global_attributes = tree.tree_map(lambda g: jnp.repeat(
-        g, n_node, axis=0, total_repeat_length=sum_n_node), globals_)
-    nodes = update_node_selection_fn(nodes, sent_attributes,
-                                     received_attributes, global_attributes)
-
-    sent_attributes = tree.tree_map(lambda n: n[senders], nodes)
-    received_attributes = tree.tree_map(lambda n: n[receivers], nodes)
-
-    global_edge_attributes = tree.tree_map(lambda g: jnp.repeat(
-        g, n_edge, axis=0, total_repeat_length=sum_n_edge), globals_)
-    edges = update_edge_selection_fn(edges, sent_attributes, received_attributes, global_edge_attributes)
-
-
-    flip_mask=edges["rn"]==edges["rn_min"]
+   # flip_mask=edges["rn"]==edges["rn_min"]
 
 
    # if update_edge_flip_selection_fn:
@@ -735,29 +635,417 @@ rng_key: Optional[jax.Array] = None,
 
         return selected
 
-    flip_mask = jnp.int32(mis_kring_edges(
-        senders=senders,
-        receivers=receivers,
-        num_nodes=n_node_max,
-        key=rng_key,
-        K=2,  # 4-ring exclusion
-        max_iters=20,  # usually enough
-    ))
+   # flip_mask = jnp.int32(mis_kring_edges(
+   #     senders=senders,
+   #     receivers=receivers,
+   #     num_nodes=n_node_max,
+   #     key=rng_key,
+   #     K=5,  # 4-ring exclusion
+   #     max_iters=20,  # usually enough
+   # ))
+   # flip_mask = jnp.ones_like(edges["rn"])
 
+    def rebuild_faces_from_dual(
+            senders,  # (E,)
+            receivers,  # (E,)
+            face_senders,  # (E,)
+            face_receivers,  # (E,)
+            faces,  # frozendict with key "edges" of shape (F,3)
+    ):
+        """
+        Robust O(E) rebuild of faces["edges"] from dual adjacency.
 
+        Guarantees:
+          - exactly the edges incident to each face are used
+          - max 3 edges per face (extras dropped deterministically)
+          - invalid references ignored
+          - cyclic ordering enforced
+        """
 
+        import jax
+        import jax.numpy as jnp
+        from frozendict import frozendict
 
+        E = senders.shape[0]
+        F = faces["edges"].shape[0]
 
+        # ------------------------------------------------------------
+        # 0. Edge ids
+        # ------------------------------------------------------------
+        edge_ids = jnp.arange(E, dtype=jnp.int32)
 
+        # ------------------------------------------------------------
+        # 1. Build (face, edge) pairs
+        # ------------------------------------------------------------
+        faces_flat = jnp.concatenate(
+            [face_senders, face_receivers], axis=0
+        )  # (2E,)
+        edges_flat = jnp.concatenate(
+            [edge_ids, edge_ids], axis=0
+        )  # (2E,)
 
+        # valid face reference
+        valid = (faces_flat >= 0) & (faces_flat < F)
 
+        # route invalid to dummy face F
+        faces_safe = jnp.where(valid, faces_flat, F)
+        edges_safe = jnp.where(valid, edges_flat, -1)
 
+        # ------------------------------------------------------------
+        # 2. Compute per-face insertion slots (stable, O(E))
+        # ------------------------------------------------------------
+        # count how many times each face appears
+        counts = jax.ops.segment_sum(
+            jnp.ones_like(faces_safe, dtype=jnp.int32),
+            faces_safe,
+            num_segments=F + 1,
+        )  # (F+1,)
 
+        # prefix sums give starting offsets
+        offsets = jnp.cumsum(counts) - counts  # (F+1,)
 
+        # global position in grouped layout
+        order = jnp.arange(faces_safe.shape[0], dtype=jnp.int32)
+        slot = order - offsets[faces_safe]
 
+        # keep only first 3 edges per face
+        valid_slot = valid & (slot < 3)
 
+        faces_safe = jnp.where(valid_slot, faces_safe, F)
+        slot = jnp.where(valid_slot, slot, 0)
+        edges_safe = jnp.where(valid_slot, edges_safe, -1)
 
-    K =  n_edge_max // 10
+        # ------------------------------------------------------------
+        # 3. Scatter into (F+1, 3)
+        # ------------------------------------------------------------
+        faces_edges = jnp.full((F + 1, 3), -1, dtype=jnp.int32)
+
+        faces_edges = faces_edges.at[faces_safe, slot].set(edges_safe)
+
+        # drop dummy face
+        faces_edges = faces_edges[:F]
+
+        # ------------------------------------------------------------
+        # 4. Enforce cyclic ordering per face
+        # ------------------------------------------------------------
+        perms = jnp.array(
+            [
+                [0, 1, 2],
+                [0, 2, 1],
+                [1, 0, 2],
+                [1, 2, 0],
+                [2, 0, 1],
+                [2, 1, 0],
+            ],
+            dtype=jnp.int32,
+        )
+
+        def order_face(edges):
+            # edges may contain -1; mask them
+            valid = edges >= 0
+            edges = jnp.where(valid, edges, edges[0])
+
+            u = senders[edges]
+            v = receivers[edges]
+
+            def ok(p):
+                return (
+                        (v[p[0]] == u[p[1]]) &
+                        (v[p[1]] == u[p[2]]) &
+                        (v[p[2]] == u[p[0]])
+                )
+
+            ok_mask = jax.vmap(ok)(perms)
+            idx = jnp.argmax(ok_mask)
+
+            return edges[perms[idx]]
+
+        faces_edges = jax.vmap(order_face)(faces_edges)
+
+        return frozendict({**faces, "edges": faces_edges})
+
+    def rebuild_faces_from_dual_fast(
+            senders,  # (E,)
+            receivers,  # (E,)
+            face_senders,  # (E,)
+            face_receivers,  # (E,)
+            faces,  # frozendict with key "edges"
+    ):
+        """
+        O(E) rebuild of faces["edges"] from primal + dual adjacency.
+
+        Guarantees:
+          - each face has exactly 3 edges
+          - cyclic order is correct
+          - no face corruption
+          - JIT-safe
+        """
+
+        import jax
+        import jax.numpy as jnp
+        from frozendict import frozendict
+
+        E = senders.shape[0]
+        F = faces["edges"].shape[0]
+
+        edge_ids = jnp.arange(E, dtype=jnp.int32)
+
+        # ------------------------------------------------------------
+        # 1. Build (face, edge) pairs (2E entries)
+        # ------------------------------------------------------------
+
+        faces_flat = jnp.concatenate(
+            [face_senders, face_receivers], axis=0
+        )  # (2E,)
+        edges_flat = jnp.concatenate(
+            [edge_ids, edge_ids], axis=0
+        )  # (2E,)
+
+        valid = faces_flat >= 0
+
+        faces_flat = jnp.where(valid, faces_flat, F)  # dummy face = F
+        edges_flat = jnp.where(valid, edges_flat, -1)
+
+        # ------------------------------------------------------------
+        # 2. Assign local slot index per face (0,1,2)
+        #    via per-face running counters (O(E))
+        # ------------------------------------------------------------
+
+        counts = jnp.zeros(F + 1, dtype=jnp.int32)
+
+        def assign_slot(carry, x):
+            counts = carry
+            f = x
+            slot = counts[f]
+            counts = counts.at[f].add(1)
+            return counts, slot
+
+        _, slots = jax.lax.scan(assign_slot, counts, faces_flat)
+
+        # only allow slots 0,1,2
+        valid_slot = (slots < 3) & (faces_flat < F)
+        faces_safe = jnp.where(valid_slot, faces_flat, F)
+        slots_safe = jnp.where(valid_slot, slots, 0)
+        edges_safe = jnp.where(valid_slot, edges_flat, -1)
+
+        # ------------------------------------------------------------
+        # 3. Scatter edges into faces
+        # ------------------------------------------------------------
+
+        faces_edges = jnp.full((F + 1, 3), -1, dtype=jnp.int32)
+
+        faces_edges = faces_edges.at[
+            faces_safe, slots_safe
+        ].set(edges_safe)
+
+        faces_edges = faces_edges[:F]
+
+        # ------------------------------------------------------------
+        # 4. Enforce cyclic order per face
+        # ------------------------------------------------------------
+
+        perms = jnp.array(
+            [
+                [0, 1, 2],
+                [0, 2, 1],
+                [1, 0, 2],
+                [1, 2, 0],
+                [2, 0, 1],
+                [2, 1, 0],
+            ],
+            dtype=jnp.int32,
+        )
+
+        def order_face(edges):
+            # If face is incomplete, leave untouched
+            def unchanged():
+                return edges
+
+            def reorder():
+                u = senders[edges]
+                v = receivers[edges]
+
+                def valid_perm(p):
+                    return (
+                            (v[p[0]] == u[p[1]]) &
+                            (v[p[1]] == u[p[2]]) &
+                            (v[p[2]] == u[p[0]])
+                    )
+
+                ok = jax.vmap(valid_perm)(perms)
+                idx = jnp.argmax(ok)
+                return edges[perms[idx]]
+
+            return jax.lax.cond(
+                jnp.any(edges < 0),
+                unchanged,
+                reorder,
+            )
+
+        faces_edges = jax.vmap(order_face)(faces_edges)
+
+        return frozendict({**faces, "edges": faces_edges})
+
+    def rebuild_faces_from_dual(
+            senders,  # (E,)
+            receivers,  # (E,)
+            face_senders,  # (E,)
+            face_receivers,  # (E,)
+            faces,  # frozendict with key "edges"
+    ):
+        """
+        JIT-safe rebuild of faces["edges"] from primal + dual adjacency.
+        Assumes triangular faces (exactly 3 edges per face).
+        """
+
+        import jax
+        import jax.numpy as jnp
+        from frozendict import frozendict
+
+        E = senders.shape[0]
+        F = faces["edges"].shape[0]
+
+        edge_ids = jnp.arange(E, dtype=jnp.int32)
+
+        # ------------------------------------------------------------
+        # 1. Build flattened (face, edge) pairs (NO FILTERING)
+        # ------------------------------------------------------------
+        faces_flat = jnp.stack(
+            [face_senders, face_receivers], axis=1
+        ).reshape(-1)  # (2E,)
+
+        edges_flat = jnp.tile(
+            edge_ids[:, None], (1, 2)
+        ).reshape(-1)  # (2E,)
+
+        valid = faces_flat >= 0
+
+        # redirect invalid entries to dummy face F
+        faces_safe = jnp.where(valid, faces_flat, F)
+        edges_safe = jnp.where(valid, edges_flat, -1)
+
+        # ------------------------------------------------------------
+        # 2. Assign slots (0,1,2) per face using segment_sum
+        # ------------------------------------------------------------
+        # 1. Build a mask of valid entries
+        is_valid = faces_flat >= 0
+
+        # 2. For each (face, edge) pair, count how many
+        #    times this face appeared BEFORE this position
+        order = jnp.arange(faces_flat.shape[0], dtype=jnp.int32)
+
+        # compare current face with all previous ones
+        same_face = faces_safe[:, None] == faces_safe[None, :]
+        earlier = order[None, :] < order[:, None]
+
+        # count earlier occurrences per element
+        slot = jnp.sum(same_face & earlier, axis=1)
+
+        # invalid entries go to dummy slot
+        slot = jnp.where(is_valid, slot, 0)
+
+        # ------------------------------------------------------------
+        # 3. Scatter edges into (F+1, 3)
+        # ------------------------------------------------------------
+        faces_edges = jnp.full(
+            (F + 1, 3), -1, dtype=jnp.int32
+        )
+
+        faces_edges = faces_edges.at[
+            faces_safe, slot
+        ].set(edges_safe)
+
+        # drop dummy face
+        faces_edges = faces_edges[:F]
+
+        # ------------------------------------------------------------
+        # 4. Order edges cyclically per face
+        # ------------------------------------------------------------
+        perms = jnp.array(
+            [
+                [0, 1, 2],
+                [0, 2, 1],
+                [1, 0, 2],
+                [1, 2, 0],
+                [2, 0, 1],
+                [2, 1, 0],
+            ],
+            dtype=jnp.int32,
+        )
+
+        def order_face(edges):
+            u = senders[edges]
+            v = receivers[edges]
+
+            def valid_perm(p):
+                return (
+                        (v[p[0]] == u[p[1]]) &
+                        (v[p[1]] == u[p[2]]) &
+                        (v[p[2]] == u[p[0]])
+                )
+
+            ok = jax.vmap(valid_perm)(perms)
+            idx = jnp.argmax(ok)
+            return edges[perms[idx]]
+
+        faces_edges = jax.vmap(order_face)(faces_edges)
+
+        return frozendict({**faces, "edges": faces_edges})
+
+    def rebuild_face_incidence_from_faces(face_edges, n_edges):
+        """
+        Rebuild face_senders / face_receivers from faces["edges"].
+
+        Convention:
+          - First occurrence of an edge -> face_receivers
+          - Second occurrence           -> face_senders
+
+        Args:
+            face_edges: (n_faces, 3) int32
+            n_edges: total number of edges
+
+        Returns:
+            face_senders:   (n_edges,) int32
+            face_receivers: (n_edges,) int32
+        """
+
+        n_faces, n_per_face = face_edges.shape
+
+        face_receivers = -jnp.ones(n_edges, dtype=jnp.int32)
+        face_senders = -jnp.ones(n_edges, dtype=jnp.int32)
+
+        # Track how many times we've seen each edge
+        counts = jnp.zeros(n_edges, dtype=jnp.int32)
+
+        edge_ids = face_edges.reshape(-1)  # (n_faces * 3,)
+        face_ids = jnp.repeat(
+            jnp.arange(n_faces, dtype=jnp.int32),
+            n_per_face,
+        )
+
+        valid = edge_ids >= 0
+        safe_e = jnp.where(valid, edge_ids, 0)
+
+        occ = counts[safe_e]
+
+        # First occurrence -> receiver
+        recv_mask = (occ == 0) & valid
+        face_receivers = face_receivers.at[safe_e].set(
+            jnp.where(recv_mask, face_ids, face_receivers[safe_e])
+        )
+
+        # Second occurrence -> sender
+        send_mask = (occ == 1) & valid
+        face_senders = face_senders.at[safe_e].set(
+            jnp.where(send_mask, face_ids, face_senders[safe_e])
+        )
+
+        # Increment counts
+        counts = counts.at[safe_e].add(valid.astype(jnp.int32))
+
+        return face_senders, face_receivers
+
+    K = n_edge_max // 4
 
     def extract_flip_edges(flip_mask, K):
         # get candidate flip edges (possibly padded)
@@ -771,9 +1059,596 @@ rng_key: Optional[jax.Array] = None,
 
         return flip_edges, safe_edges, valid
 
+    flip_edges, safe_edges, valid0 = extract_flip_edges(flip_mask, K)
+
+    def resolve_conflicts_randomized(
+            writes,  # (K, R) int32, vertex IDs, padded with -1
+            valid,  # (K,) bool
+            priority,  # (K,) float32
+            num_nodes,  # total number of vertices
+    ):
+        """
+        Randomized MIS conflict resolution with PURE VERTEX ownership.
+
+        A flip survives iff it owns ALL vertices in its write-set.
+        """
+
+        K, R = writes.shape
+
+        # ------------------------------------------------------------
+        # Flatten write-set
+        # ------------------------------------------------------------
+        resources = writes.reshape(-1)  # (K*R,)
+        op_ids = jnp.repeat(jnp.arange(K), R)  # (K*R,)
+
+        # ------------------------------------------------------------
+        # Valid entries only
+        # ------------------------------------------------------------
+        valid_flat = (resources >= 0) & jnp.repeat(valid, R)
+
+        # ------------------------------------------------------------
+        # Shift resources so 0 is reserved dummy
+        # ------------------------------------------------------------
+        resources_shifted = resources + 1  # real nodes: 1..num_nodes
+
+        resources_safe = jnp.where(valid_flat, resources_shifted, 0)
+        prios_safe = jnp.where(valid_flat, priority[op_ids], jnp.inf)
+
+        # ------------------------------------------------------------
+        # One owner per vertex
+        # ------------------------------------------------------------
+        owner_prio = jax.ops.segment_min(
+            prios_safe,
+            resources_safe,
+            num_segments=num_nodes + 1
+        )
+
+        owns = prios_safe == owner_prio[resources_safe]
+
+        # ------------------------------------------------------------
+        # Flip survives only if it owns ALL its vertices
+        # ------------------------------------------------------------
+        owns_per_op = jax.ops.segment_min(
+            owns.astype(jnp.int32),
+            op_ids,
+            num_segments=K
+        )
+
+        return owns_per_op.astype(bool)
+
+    def compute_flip_aggregate(
+            senders,
+            receivers,
+            faces,
+            face_senders,
+            face_receivers,
+            flip_edges,
+    ):
+        """
+        Pure computation of flip aggregates.
+        No conflict resolution.
+        No mutation.
+        """
+
+        faces_edges = faces["edges"]
+        old_s = senders
+        old_r = receivers
+        num_faces = faces_edges.shape[0]
+
+        valid = flip_edges >= 0
+        e = jnp.where(valid, flip_edges, -1)
+
+        fL = jnp.where(valid, face_senders[e], -1)
+        fR = jnp.where(valid, face_receivers[e], -1)
+        valid &= (fL >= 0) & (fR >= 0)
+
+        i = jnp.where(valid, old_s[e], -1)
+        j = jnp.where(valid, old_r[e], -1)
+
+        def opposing_vertex(f_ids, a, b):
+            fe = faces_edges[f_ids]
+            s = old_s[fe]
+            r = old_r[fe]
+            ov = jnp.where(
+                (s != a[:, None]) & (s != b[:, None]), s,
+                jnp.where((r != a[:, None]) & (r != b[:, None]), r, -1)
+            )
+            return ov.max(axis=1)
+
+        k = opposing_vertex(fL, i, j)
+        l = opposing_vertex(fR, i, j)
+
+        quad_ok = (
+                (k >= 0) & (l >= 0) &
+                (k != l) &
+                (i != k) & (i != l) &
+                (j != k) & (j != l)
+        )
+        valid &= quad_ok
+
+        def find_edge_with(f_ids, a, b, faces_edges, senders, receivers):
+            """
+            For each face f_ids[t], find the edge in that face
+            connecting vertices a[t] and b[t].
+            Returns edge id or -1.
+            """
+            fe = faces_edges[f_ids]  # (K, 3)
+            s = senders[fe]  # (K, 3)
+            r = receivers[fe]  # (K, 3)
+
+            mask = ((s == a[:, None]) & (r == b[:, None])) | \
+                   ((s == b[:, None]) & (r == a[:, None]))
+
+            idx = jnp.argmax(mask, axis=1)
+            exists = jnp.any(mask, axis=1)
+
+            edge = fe[jnp.arange(fe.shape[0]), idx]
+            return jnp.where(exists, edge, -1)
+
+        e_jk = find_edge_with(fL, j, k, faces_edges, old_s, old_r)
+        e_ki = find_edge_with(fL, k, i, faces_edges, old_s, old_r)
+        e_il = find_edge_with(fR, i, l, faces_edges, old_s, old_r)
+        e_lj = find_edge_with(fR, l, j, faces_edges, old_s, old_r)
+
+        neigh_ok = (e_jk >= 0) & (e_ki >= 0) & (e_il >= 0) & (e_lj >= 0)
+        valid &= neigh_ok
+
+        def m(x): return jnp.where(valid, x, -1)
+
+        aggregate = jnp.stack(
+            [
+                m(i), m(j), m(k), m(l),
+                m(e), m(fL), m(fR),
+                m(e_jk), m(e_ki), m(e_il), m(e_lj),
+                m(old_s[e]), m(old_r[e]),
+            ],
+            axis=1,
+        ).astype(jnp.int32)
+
+        return aggregate
+
+    def resolve_flip_conflicts(
+            aggregate,
+            node_neighbors,
+            face_senders,
+            face_receivers,
+            rng_key,
+            n_node_max,
+    ):
+        K = aggregate.shape[0]
+
+        quad = aggregate[:, :4]
+        e = aggregate[:, 4]
+        valid = e >= 0
+
+        nbr_i = node_neighbors[quad[:, 0]]
+        nbr_j = node_neighbors[quad[:, 1]]
+        nbr_k = node_neighbors[quad[:, 2]]
+        nbr_l = node_neighbors[quad[:, 3]]
+
+        writes = jnp.concatenate(
+            [quad, nbr_i, nbr_j, nbr_k, nbr_l],
+            axis=1,
+        )
+
+        rng_key, subkey = jax.random.split(rng_key)
+        priority = jax.random.uniform(subkey, (K,))
+        priority = jnp.where(valid, priority, jnp.inf)
+
+        keep = resolve_conflicts_randomized(
+            writes,
+            valid,
+            priority,
+            n_node_max,
+        )
+
+        mask = keep & valid
+        aggregate = jnp.where(mask[:, None], aggregate, -1)
+
+        return aggregate, rng_key
+
+    def remove_face_from_edge(fs, fr, e, face):
+        fs = fs.at[e].set(jnp.where(fs[e] == face, -1, fs[e]))
+        fr = fr.at[e].set(jnp.where(fr[e] == face, -1, fr[e]))
+        return fs, fr
+
+    def add_face_to_edge(fs, fr, e, face):
+        def add_to_receiver():
+            return fs, fr.at[e].set(face)
+
+        def add_to_sender():
+            return fs.at[e].set(face), fr
+
+        return jax.lax.cond(
+            fr[e] == -1,
+            lambda _: add_to_receiver(),
+            lambda _: add_to_sender(),
+            operand=None,
+        )
+
+    def remove_neighbor(neigh, a, b):
+        row = neigh[a]
+        row = jnp.where(row == b, -1, row)
+        return neigh.at[a].set(row)
+
+    def add_neighbor(neigh, a, b):
+        row = neigh[a]
+        idx = jnp.argmax(row == -1)
+        row = row.at[idx].set(b)
+        return neigh.at[a].set(row)
+
+    def replace_role(fs, fr, edge_ids, old_face, new_face):
+        """
+        For each edge in edge_ids:
+          if fs[e] == old_face -> replace with new_face
+          if fr[e] == old_face -> replace with new_face
+        """
+        valid_edge = edge_ids >= 0
+
+        fs_edge = fs[edge_ids]
+        fr_edge = fr[edge_ids]
+
+        fs_edge = jnp.where(valid_edge & (fs_edge == old_face), new_face, fs_edge)
+        fr_edge = jnp.where(valid_edge & (fr_edge == old_face), new_face, fr_edge)
+
+        fs = fs.at[edge_ids].set(fs_edge)
+        fr = fr.at[edge_ids].set(fr_edge)
+
+        return fs, fr
+
+    def apply_flip_serial_full(
+            senders,
+            receivers,
+            faces,
+            face_senders,
+            face_receivers,
+            node_neighbors,
+            agg_row,
+    ):
+        (
+            i, j, k, l,
+            e, fL, fR,
+            e_jk, e_ki, e_il, e_lj,
+            s_old, r_old,
+        ) = agg_row
+
+        def no_op():
+            return senders, receivers, faces, face_senders, face_receivers, node_neighbors
+
+        def do_flip():
+            s = senders
+            r = receivers
+            fs = face_senders
+            fr = face_receivers
+            neigh = node_neighbors
+
+            # --------------------------------------------------
+            # Edge orientation
+            # --------------------------------------------------
+            s = s.at[e].set(k)
+            r = r.at[e].set(l)
+
+            # --------------------------------------------------
+            # Face edges
+            # --------------------------------------------------
+            faces_edges = faces["edges"]
+            faces_edges = (
+                faces_edges
+                .at[fL].set(jnp.array([e, e_lj, e_jk], dtype=jnp.int32))
+                .at[fR].set(jnp.array([e, e_ki, e_il], dtype=jnp.int32))
+            )
+            new_faces = frozendict({**faces, "edges": faces_edges})
+
+            # --------------------------------------------------
+            # Face incidence (replace_role — SAME AS BEFORE)
+            # --------------------------------------------------
+            # fL -> fR
+           # fs, fr = replace_role(fs, fr, e_jk, fL, fR)
+            fs, fr = replace_role(fs, fr, e_ki, fL, fR)
+
+            # fR -> fL
+           # fs, fr = replace_role(fs, fr, e_il, fR, fL)
+            fs, fr = replace_role(fs, fr, e_lj, fR, fL)
+
+            # --------------------------------------------------
+            # Neighbors
+            # --------------------------------------------------
+            neigh = remove_neighbor(neigh, i, j)
+            neigh = remove_neighbor(neigh, j, i)
+            neigh = add_neighbor(neigh, k, l)
+            neigh = add_neighbor(neigh, l, k)
+
+            return s, r, new_faces, fs, fr, neigh
+
+        return jax.lax.cond(e >= 0, do_flip, no_op)
+
+    def undo_flip_serial_full(
+            senders,
+            receivers,
+            faces,
+            face_senders,
+            face_receivers,
+            node_neighbors,
+            agg_row,
+    ):
+        (
+            i, j, k, l,
+            e, fL, fR,
+            e_jk, e_ki, e_il, e_lj,
+            s_old, r_old,
+        ) = agg_row
+
+        def no_op():
+            return senders, receivers, faces, face_senders, face_receivers, node_neighbors
+
+        def undo():
+            s = senders
+            r = receivers
+            fs = face_senders
+            fr = face_receivers
+            neigh = node_neighbors
+
+            # --------------------------------------------------
+            # Restore edge orientation
+            # --------------------------------------------------
+            s = s.at[e].set(s_old)
+            r = r.at[e].set(r_old)
+
+            # --------------------------------------------------
+            # Restore face edges
+            # --------------------------------------------------
+            faces_edges = faces["edges"]
+            faces_edges = (
+                faces_edges
+                .at[fL].set(jnp.array([e, e_jk, e_ki], dtype=jnp.int32))
+                .at[fR].set(jnp.array([e, e_il, e_lj], dtype=jnp.int32))
+            )
+            new_faces = frozendict({**faces, "edges": faces_edges})
+
+            # --------------------------------------------------
+            # Restore face incidence (replace_role — inverse)
+            # --------------------------------------------------
+            # fR -> fL
+
+         #   new_fs = face_senders.copy()
+         #   new_fr = face_receivers.copy()
+         #   new_fs, new_fr = replace_role(new_fs, new_fr, e_lj, fR, fL)
+         #   new_fs, new_fr = replace_role(new_fs, new_fr, e_ki, fL, fR)
+
+          #  fs, fr = replace_role(fs, fr, e_jk, fR, fL)
+            fs, fr = replace_role(fs, fr, e_ki, fR, fL)
+
+            # fL -> fR
+           # fs, fr = replace_role(fs, fr, e_il, fL, fR)
+            fs, fr = replace_role(fs, fr, e_lj, fL, fR)
+
+            # --------------------------------------------------
+            # Restore neighbors
+            # --------------------------------------------------
+            neigh = remove_neighbor(neigh, k, l)
+            neigh = remove_neighbor(neigh, l, k)
+            neigh = add_neighbor(neigh, i, j)
+            neigh = add_neighbor(neigh, j, i)
+
+            return s, r, new_faces, fs, fr, neigh
+
+        return jax.lax.cond(e >= 0, undo, no_op)
+
+    def apply_aggregate_serial_full(
+            senders,
+            receivers,
+            faces,
+            face_senders,
+            face_receivers,
+            node_neighbors,
+            aggregate,
+            forward=True,
+    ):
+        def body(state, agg_row):
+            if forward:
+                return apply_flip_serial_full(*state, agg_row), None
+            else:
+                return undo_flip_serial_full(*state, agg_row), None
+
+        init = (
+            senders,
+            receivers,
+            faces,
+            face_senders,
+            face_receivers,
+            node_neighbors,
+        )
+
+        (senders, receivers, faces, face_senders, face_receivers, node_neighbors), _ = (
+            jax.lax.scan(body, init, aggregate)
+        )
+
+        return senders, receivers, faces, face_senders, face_receivers, node_neighbors
 
 
-   # flip_mask = luby_mis_flip_mask(
+
+    def commit_flip_from_aggregate(
+            senders,
+            receivers,
+            faces,
+            node_neighbors,
+            agg_row,
+    ):
+        (
+            i, j, k, l,
+            e, fL, fR,
+            e_jk, e_ki, e_il, e_lj,
+            _, _,
+        ) = agg_row
+
+        def no_op():
+            return senders, receivers, faces, node_neighbors
+
+        def do_flip():
+            # --- edge orientation ---
+            new_s = senders.at[e].set(k)
+            new_r = receivers.at[e].set(l)
+
+            # --- faces ---
+            faces_edges = faces["edges"]
+            faces_edges = (
+                faces_edges
+                .at[fL].set(jnp.array([e, e_lj, e_jk], dtype=jnp.int32))
+                .at[fR].set(jnp.array([e, e_ki, e_il], dtype=jnp.int32))
+            )
+            new_faces = frozendict({**faces, "edges": faces_edges})
+
+            # --- neighbors ---
+            neigh = node_neighbors
+            neigh = remove_neighbor(neigh, i, j)
+            neigh = remove_neighbor(neigh, j, i)
+            neigh = add_neighbor(neigh, k, l)
+            neigh = add_neighbor(neigh, l, k)
+
+            return new_s, new_r, new_faces, neigh
+
+        return jax.lax.cond(e >= 0, do_flip, no_op)
+
+    def undo_flip_from_aggregate(
+            senders,
+            receivers,
+            faces,
+            node_neighbors,
+            agg_row,
+    ):
+        (
+            i, j, k, l,
+            e, fL, fR,
+            e_jk, e_ki, e_il, e_lj,
+            s_old, r_old,
+        ) = agg_row
+
+        def no_op():
+            return senders, receivers, faces, node_neighbors
+
+        def undo():
+            # --- restore edge orientation ---
+            new_s = senders.at[e].set(s_old)
+            new_r = receivers.at[e].set(r_old)
+
+            # --- restore faces ---
+            faces_edges = faces["edges"]
+            faces_edges = (
+                faces_edges
+                .at[fL].set(jnp.array([e, e_jk, e_ki], dtype=jnp.int32))
+                .at[fR].set(jnp.array([e, e_il, e_lj], dtype=jnp.int32))
+            )
+            new_faces = frozendict({**faces, "edges": faces_edges})
+
+            # --- restore neighbors ---
+            neigh = node_neighbors
+            neigh = remove_neighbor(neigh, k, l)
+            neigh = remove_neighbor(neigh, l, k)
+            neigh = add_neighbor(neigh, i, j)
+            neigh = add_neighbor(neigh, j, i)
+
+            return new_s, new_r, new_faces, neigh
+
+        return jax.lax.cond(e >= 0, undo, no_op)
+
+    def apply_aggregate_serial(
+            senders,
+            receivers,
+            faces,
+            node_neighbors,
+            aggregate,
+            forward=True,
+    ):
+        def body(state, agg_row):
+            s, r, f, nbh = state
+            if forward:
+                return commit_flip_from_aggregate(s, r, f, nbh, agg_row), None
+            else:
+                return undo_flip_from_aggregate(s, r, f, nbh, agg_row), None
+
+        init = (senders, receivers, faces, node_neighbors)
+        (senders, receivers, faces, node_neighbors), _ = jax.lax.scan(
+            body, init, aggregate
+        )
+
+        return senders, receivers, faces, node_neighbors
+
+    aggregate = compute_flip_aggregate(
+        senders,
+        receivers,
+        faces,
+        face_senders,
+        face_receivers,
+        flip_edges,
+    )
+
+    aggregate, rng_key = resolve_flip_conflicts(
+        aggregate,
+        node_neighbors,
+        face_senders,
+        face_receivers,
+        rng_key,
+        n_node_max,
+    )
+
+   # import jax
+   # import jax.numpy as jnp
+
+    def compactify_aggregate(aggregate, Kf, valid_col=5):
+        """
+        aggregate : (K, R) int array with -1 padding
+        Kf        : fixed output size
+        valid_col: column that contains edge_ids (-1 = invalid)
+
+        returns  : (Kf, R) compactified aggregate, padded with -1
+        """
+        K, R = aggregate.shape
+
+        # 1. row is valid if it has a non-negative edge id
+        valid_mask = aggregate[:, valid_col] >= 0
+        valid_idx = jnp.where(valid_mask, size=Kf, fill_value=-1)[0]
+
+        # 2. initialize output
+        out = -jnp.ones((Kf, R), dtype=aggregate.dtype)
+
+        # 3. scatter valid rows
+        valid_rows = aggregate[valid_idx]
+        out = out.at[jnp.arange(Kf)].set(
+            jnp.where(valid_idx[:, None] >= 0, valid_rows, out)
+        )
+
+        return out
+
+    Kf = n_edge_max // 80
+    aggregate=compactify_aggregate(aggregate,Kf)
+    # senders, receivers, faces, node_neighbors = apply_aggregate_serial(
+   #     senders,
+   #     receivers,
+   #     faces,
+   #     node_neighbors,
+   #     aggregate,
+   #     forward=True,
+   # )
+
+    senders, receivers, faces, face_senders, face_receivers, node_neighbors = (
+        apply_aggregate_serial_full(
+            senders,
+            receivers,
+            faces,
+            face_senders,
+            face_receivers,
+            node_neighbors,
+            aggregate,
+            forward=True,
+        )
+    )
+
+  #  face_senders, face_receivers = rebuild_face_incidence_from_faces(
+  #      faces["edges"],
+  #      n_edges=senders.shape[0],
+  #  )
+
+    # flip_mask = luby_mis_flip_mask(
    #     senders, receivers,
    #     face_senders, face_receivers,
    #     edges["flip_site"],
@@ -787,7 +1662,7 @@ rng_key: Optional[jax.Array] = None,
 
     #flip_mask=flip_candidates & edges["flip_site"]
    # flip_edges,safe_edges,valid = extract_flip_edges(edges["flip_site"],K)
-    flip_edges, safe_edges, valid = extract_flip_edges(flip_mask, K)
+   # flip_edges, safe_edges, valid = extract_flip_edges(flip_mask, K)
 
     #flip_edges=select_independent_flips(senders, receivers,
     #face_senders, face_receivers, face_edges,
@@ -917,17 +1792,55 @@ rng_key: Optional[jax.Array] = None,
                 node_neighbors,
             )
 
-        senders, receivers, faces, face_senders, face_receivers, aggregate,node_neighbors = apply_flips_serial(
-            senders,
-            receivers,
-            faces,
-            face_senders,
-            face_receivers,
-            flip_edges,
-            node_neighbors
-        )
 
-        def per_flip_energy_sum(node_energy, edge_energy, face_energy, aggregate):
+
+     #   senders, receivers, faces, fs, fr = apply_flip_topology(
+     #       senders,
+     #       receivers,
+     #       faces,
+     #       face_senders,
+     #       face_receivers,
+     #       aggregate,
+     #       final_mask
+     #   )
+
+      #  senders, receivers, faces, face_senders, face_receivers, aggregate,node_neighbors = apply_flips_serial(
+      #      senders,
+      #      receivers,
+      #      faces,
+      #      face_senders,
+      #      face_receivers,
+      #      flip_edges,
+      #      node_neighbors
+      #  )
+
+    #    (
+    #        senders,
+    #        receivers,
+    #        faces,
+    #        face_senders,
+    #        face_receivers,
+    #        flip_edges,
+    #        aggregate,
+   #         node_neighbors,
+   #         rng_key,
+   #     ) = flip_edge_fn(
+   #             senders,
+   #             receivers,
+   #             faces,
+   #             face_senders,
+   #             face_receivers,
+   #             flip_edges,  # (K,) padded with -1
+   #             node_neighbors,
+   #             rng_key,
+   #             n_node_max,
+   #     )
+
+    #    aggregate1=aggregate
+
+
+
+        def per_flip_energy_sum_old(node_energy, edge_energy, face_energy, aggregate):
             quad_nodes = aggregate[:, :4]  # (K,4)
             flip_edge = aggregate[:, 4]  # (K,)
             flip_faces = aggregate[:, 5:7]  # (K,2)
@@ -943,6 +1856,41 @@ rng_key: Optional[jax.Array] = None,
 
             return E_nodes + E_edge + E_faces  # (K,)
 
+        def per_flip_energy_sum(node_energy, edge_energy, face_energy, aggregate):
+            """
+            Per-flip local energy using the aggregate layout (K, 11).
+
+            NOTE: This is mechanically correct but NOT sufficient for
+            physically correct Metropolis in most mesh energies.
+            """
+
+            # vertices involved in the quad
+            quad_nodes = aggregate[:, 0:4]  # (K, 4)
+
+            # edges involved
+            quad_edges = aggregate[:, [4, 7, 8, 9, 10]]  # (K, 5)
+
+            # faces involved
+            quad_faces = aggregate[:, 5:7]  # (K, 2)
+
+            # ------------------------
+            # validity masks
+            # ------------------------
+            valid_nodes = quad_nodes >= 0
+            valid_edges = quad_edges >= 0
+            valid_faces = quad_faces >= 0
+
+            # ------------------------
+            # energy sums
+            # ------------------------
+            E_nodes = jnp.where(valid_nodes, node_energy[quad_nodes], 0.0).sum(axis=1)
+            E_edges = jnp.where(valid_edges, edge_energy[quad_edges], 0.0).sum(axis=1)
+            E_faces = jnp.where(valid_faces, face_energy[quad_faces], 0.0).sum(axis=1)
+
+            return E_nodes + E_edges + E_faces  # (K,)
+
+
+
     energy_before=per_flip_energy_sum(nodes["energy"],edges['energy'],faces['energy'],aggregate)
 
 
@@ -955,7 +1903,16 @@ rng_key: Optional[jax.Array] = None,
 
     if update_edge_local_fn:
 
+      #  faces = rebuild_faces_from_dual_fast(
+      #      senders,
+      #      receivers,
+      #      face_senders,
+      #      face_receivers,
+      #      faces
+      #  )
+
         face_edges = faces["edges"]
+
         #face_vertices = faces["vertices"]
         if not tree.tree_all(
                 tree.tree_map(lambda n: n.shape[0] == sum_n_node, nodes)):
@@ -1016,28 +1973,554 @@ rng_key: Optional[jax.Array] = None,
             nodes = update_node_local_fn(nodes, sent_attributes,
                                    received_attributes, node_mask,global_attributes)
 
+
+
         energy_after = per_flip_energy_sum(nodes["energy"], edges['energy'], faces['energy'], aggregate)
 
-        flip_edges,accepted_fraction,rng_key=metropolis_fn(flip_edges,
+        def mask_aggregate_by_flip_edges(aggregate, flip_edges):
+            """
+            Disable aggregate rows where flip_edges[t] < 0.
+
+            Args:
+                aggregate: (K, A) int32
+                flip_edges: (K,) int32, -1 means rejected
+
+            Returns:
+                aggregate_masked: (K, A) int32
+            """
+            keep = flip_edges >= 0
+            return jnp.where(keep[:, None], aggregate, -1)
+
+        flip_edges,accepted_fraction,rng_key=metropolis_fn(aggregate[:, 4],
             energy_before,
             energy_after,
-            10,
+            1,
             rng_key,
         )
 
+        aggregate = mask_aggregate_by_flip_edges(aggregate, flip_edges)
+        flip_edges=aggregate[:, 4]
 
-        senders, receivers, faces, face_senders, face_receivers, aggregate, node_neighbors= apply_flips_serial(
-            senders,
-            receivers,
-            faces,
-            face_senders,
-            face_receivers,
-            flip_edges,
-            node_neighbors
+        #senders, receivers, faces, node_neighbors = apply_aggregate_serial(
+        #    senders,
+        #    receivers,
+        #    faces,
+        #    node_neighbors,
+        #    aggregate,
+        #    forward=False,  # ← undo
+        #)
+
+        #face_senders, face_receivers = rebuild_face_incidence_from_faces(
+        #    faces["edges"],
+        #    n_edges=senders.shape[0],
+        #)
+      #  flip_edges
+
+        senders, receivers, faces, face_senders, face_receivers, node_neighbors = (
+            apply_aggregate_serial_full(
+                senders,
+                receivers,
+                faces,
+                face_senders,
+                face_receivers,
+                node_neighbors,
+                aggregate,
+                forward=False,
+            )
         )
 
+        def unique_owner(mask, face_ids, num_faces):
+            """
+            mask      : (K,) bool
+            face_ids  : (K,) int, may contain -1
+            returns   : (K,) bool — True only for the first owner of each face
+            """
+            valid = mask & (face_ids >= 0)
 
-    globals_=frozendict({**globals_,"flips_per":jnp.sum(flip_mask)/n_edge_max,"flips_acc":accepted_fraction,"E_b":jnp.sum(energy_before),"E_a":jnp.sum(energy_after)})
+            # give each lane an id
+            lane_id = jnp.arange(face_ids.shape[0])
+
+            # for each face, find minimum lane id
+            owner = jnp.full(num_faces, face_ids.shape[0], dtype=jnp.int32)
+            owner = owner.at[face_ids].min(lane_id)
+
+            # keep only the owner
+            is_owner = valid & (lane_id == owner[face_ids])
+            return is_owner
+
+        def flip_edges_topology_no_conflicts(
+                senders,
+                receivers,
+                faces,
+                face_senders,
+                face_receivers,
+                flip_edges,  # (K,) padded with -1
+                node_neighbors,
+        ):
+            """
+            Same semantics as flip_edges_topology_no_conflicts,
+            but GUARANTEES index safety:
+              - no scatter ever sees -1
+              - masked flips do nothing
+            """
+
+            faces_edges = faces["edges"]
+            old_s = senders
+            old_r = receivers
+            num_faces = faces_edges.shape[0]
+
+            # ============================================================
+            # 1. PRECOMPUTE AGGREGATE (unchanged logic)
+            # ============================================================
+
+            valid = flip_edges >= 0
+            e = jnp.where(valid, flip_edges, -1)
+
+            fL = jnp.where(valid, face_senders[e], -1)
+            fR = jnp.where(valid, face_receivers[e], -1)
+
+            valid &= (fL >= 0) & (fR >= 0)
+
+            i = jnp.where(valid, old_s[e], -1)
+            j = jnp.where(valid, old_r[e], -1)
+
+            def opposing_vertex(f_ids, a, b):
+                fe = faces_edges[f_ids]
+                s = old_s[fe]
+                r = old_r[fe]
+                ov = jnp.where(
+                    (s != a[:, None]) & (s != b[:, None]), s,
+                    jnp.where((r != a[:, None]) & (r != b[:, None]), r, -1)
+                )
+                return ov.max(axis=1)
+
+            k = opposing_vertex(fL, i, j)
+            l = opposing_vertex(fR, i, j)
+
+            valid &= (
+                    (k >= 0) & (l >= 0) &
+                    (k != l) &
+                    (i != k) & (i != l) &
+                    (j != k) & (j != l)
+            )
+
+            own_L = unique_owner(valid, fL, num_faces)
+            own_R = unique_owner(valid, fR, num_faces)
+            valid &= own_L & own_R
+
+            def find_edge_with(f_ids, a, b):
+                fe = faces_edges[f_ids]
+                s = old_s[fe]
+                r = old_r[fe]
+                mask = ((s == a[:, None]) & (r == b[:, None])) | \
+                       ((s == b[:, None]) & (r == a[:, None]))
+                idx = jnp.argmax(mask, axis=1)
+                exists = jnp.any(mask, axis=1)
+                edge = fe[jnp.arange(fe.shape[0]), idx]
+                return jnp.where(exists, edge, -1)
+
+            e_jk = find_edge_with(fL, j, k)
+            e_ki = find_edge_with(fL, k, i)
+            e_il = find_edge_with(fR, i, l)
+            e_lj = find_edge_with(fR, l, j)
+
+            valid &= (e_jk >= 0) & (e_ki >= 0) & (e_il >= 0) & (e_lj >= 0)
+
+            def m(x): return jnp.where(valid, x, -1)
+
+            aggregate = jnp.stack(
+                [m(i), m(j), m(k), m(l),
+                 m(e), m(fL), m(fR),
+                 m(e_jk), m(e_ki), m(e_il), m(e_lj)],
+                axis=1
+            ).astype(jnp.int32)
+
+            new_flip_edges = aggregate[:, 4]
+
+            # ============================================================
+            # 2. COMMIT FLIPS (INDEX-SAFE)
+            # ============================================================
+
+            (
+                i, j, k, l,
+                e, fL, fR,
+                e_jk, e_ki, e_il, e_lj
+            ) = aggregate.T
+
+            v = e >= 0
+            vb = v[:, None]
+
+            # ---- SAFE INDICES (CRITICAL FIX) ----
+            safe_e = jnp.where(v, e, 0)
+            safe_fL = jnp.where(v, fL, 0)
+            safe_fR = jnp.where(v, fR, 0)
+            safe_ejk = jnp.where(v, e_jk, 0)
+            safe_eki = jnp.where(v, e_ki, 0)
+            safe_eil = jnp.where(v, e_il, 0)
+            safe_elj = jnp.where(v, e_lj, 0)
+
+            # ---- edge endpoints ----
+            new_senders = senders.at[safe_e].set(
+                jnp.where(v, k, senders[safe_e])
+            )
+            new_receivers = receivers.at[safe_e].set(
+                jnp.where(v, l, receivers[safe_e])
+            )
+
+            # ---- node neighbors (already safe via v) ----
+            def remove_neighbor(neigh, node, nbr):
+                row = neigh[node]
+                row = jnp.where(row == nbr, -1, row)
+                return neigh.at[node].set(row)
+
+            def add_neighbor(neigh, node, nbr):
+                row = neigh[node]
+                idx = jnp.argmax(row == -1)
+                row = row.at[idx].set(nbr)
+                return neigh.at[node].set(row)
+
+            def update_neighbors(neigh, a, b, mask, fn):
+                def body(t, nbh):
+                    return jax.lax.cond(
+                        mask[t],
+                        lambda x: fn(x, a[t], b[t]),
+                        lambda x: x,
+                        nbh
+                    )
+
+                return jax.lax.fori_loop(0, a.shape[0], body, neigh)
+
+            node_neighbors = update_neighbors(node_neighbors, i, j, v, remove_neighbor)
+            node_neighbors = update_neighbors(node_neighbors, j, i, v, remove_neighbor)
+            node_neighbors = update_neighbors(node_neighbors, k, l, v, add_neighbor)
+            node_neighbors = update_neighbors(node_neighbors, l, k, v, add_neighbor)
+
+            # ---- faces["edges"] ----
+            new_faces_edges = faces_edges
+            new_faces_edges = new_faces_edges.at[safe_fL].set(
+                jnp.where(vb, jnp.stack([e, e_lj, e_jk], axis=1),
+                          new_faces_edges[safe_fL])
+            )
+            new_faces_edges = new_faces_edges.at[safe_fR].set(
+                jnp.where(vb, jnp.stack([e, e_ki, e_il], axis=1),
+                          new_faces_edges[safe_fR])
+            )
+
+            # ---- dual adjacency ----
+            def replace_role(fs, fr, edge_ids, old_face, new_face):
+                valid_edge = edge_ids >= 0
+                safe_edge = jnp.where(valid_edge, edge_ids, 0)
+
+                fs_e = fs[safe_edge]
+                fr_e = fr[safe_edge]
+
+                fs_e = jnp.where(valid_edge & (fs_e == old_face), new_face, fs_e)
+                fr_e = jnp.where(valid_edge & (fr_e == old_face), new_face, fr_e)
+
+                fs = fs.at[safe_edge].set(fs_e)
+                fr = fr.at[safe_edge].set(fr_e)
+                return fs, fr
+
+            new_fs = face_senders.at[safe_e].set(
+                jnp.where(v, fL, face_senders[safe_e])
+            )
+            new_fr = face_receivers.at[safe_e].set(
+                jnp.where(v, fR, face_receivers[safe_e])
+            )
+
+            new_fs, new_fr = replace_role(new_fs, new_fr, e_jk, fL, fL)
+            new_fs, new_fr = replace_role(new_fs, new_fr, e_lj, fR, fL)
+            new_fs, new_fr = replace_role(new_fs, new_fr, e_ki, fL, fR)
+            new_fs, new_fr = replace_role(new_fs, new_fr, e_il, fR, fR)
+
+            new_faces = frozendict({**faces, "edges": new_faces_edges})
+
+            return (
+                new_senders,
+                new_receivers,
+                new_faces,
+                new_fs,
+                new_fr,
+                new_flip_edges,
+                aggregate,
+                node_neighbors,
+            )
+
+        def flip_edges_topology_no_conflicts(
+                senders,
+                receivers,
+                faces,
+                face_senders,
+                face_receivers,
+                flip_edges,  # (K,) padded with -1
+                node_neighbors,
+        ):
+            """
+            Identical to flip_edges_topology_with_conflicts,
+            but WITHOUT conflict resolution.
+
+            Every geometrically valid flip is committed.
+
+            Returns:
+              new_senders,
+              new_receivers,
+              new_faces,
+              new_face_senders,
+              new_face_receivers,
+              new_flip_edges,   # (K,) (same as input, masked by validity)
+              aggregate,        # (K,11)
+              node_neighbors
+            """
+
+            faces_edges = faces["edges"]
+            old_s = senders
+            old_r = receivers
+            num_faces = faces_edges.shape[0]
+
+            # ============================================================
+            # 1. PRECOMPUTE AGGREGATE (IDENTICAL LOGIC)
+            # ============================================================
+
+            valid = flip_edges >= 0
+            e = jnp.where(valid, flip_edges, -1)
+
+            fL = jnp.where(valid, face_senders[e], -1)
+            fR = jnp.where(valid, face_receivers[e], -1)
+
+            interior = (fL >= 0) & (fR >= 0)
+            valid &= interior
+
+            i = jnp.where(valid, old_s[e], -1)
+            j = jnp.where(valid, old_r[e], -1)
+
+            def opposing_vertex(f_ids, a, b):
+                fe = faces_edges[f_ids]
+                s = old_s[fe]
+                r = old_r[fe]
+                ov = jnp.where(
+                    (s != a[:, None]) & (s != b[:, None]), s,
+                    jnp.where((r != a[:, None]) & (r != b[:, None]), r, -1)
+                )
+                return ov.max(axis=1)
+
+            k = opposing_vertex(fL, i, j)
+            l = opposing_vertex(fR, i, j)
+
+            quad_ok = (
+                    (k >= 0) & (l >= 0) &
+                    (k != l) &
+                    (i != k) & (i != l) &
+                    (j != k) & (j != l)
+            )
+            valid &= quad_ok
+
+            # one flip per face (same as original)
+            own_L = unique_owner(valid, fL, num_faces)
+            own_R = unique_owner(valid, fR, num_faces)
+            valid &= own_L & own_R
+
+            def find_edge_with(f_ids, a, b):
+                fe = faces_edges[f_ids]
+                s = old_s[fe]
+                r = old_r[fe]
+                mask = ((s == a[:, None]) & (r == b[:, None])) | \
+                       ((s == b[:, None]) & (r == a[:, None]))
+                idx = jnp.argmax(mask, axis=1)
+                exists = jnp.any(mask, axis=1)
+                edge = fe[jnp.arange(fe.shape[0]), idx]
+                return jnp.where(exists, edge, -1)
+
+            e_jk = find_edge_with(fL, j, k)
+            e_ki = find_edge_with(fL, k, i)
+            e_il = find_edge_with(fR, i, l)
+            e_lj = find_edge_with(fR, l, j)
+
+            neigh_ok = (e_jk >= 0) & (e_ki >= 0) & (e_il >= 0) & (e_lj >= 0)
+            valid &= neigh_ok
+
+            def m(x): return jnp.where(valid, x, -1)
+
+            aggregate = jnp.stack(
+                [
+                    m(i), m(j), m(k), m(l),
+                    m(e), m(fL), m(fR),
+                    m(e_jk), m(e_ki), m(e_il), m(e_lj),
+                ],
+                axis=1
+            ).astype(jnp.int32)
+
+            #final flip edges = all valid flips
+            new_flip_edges = aggregate[:, 4]
+
+            # ============================================================
+            # 2. COMMIT FLIPS (IDENTICAL APPLY LOGIC)
+            # ============================================================
+
+            (
+                i, j, k, l,
+                e, fL, fR,
+                e_jk, e_ki, e_il, e_lj
+            ) = aggregate.T
+
+            v = e >= 0
+            vb = v[:, None]
+
+            new_senders = senders.at[e].set(jnp.where(v, k, senders[e]))
+            new_receivers = receivers.at[e].set(jnp.where(v, l, receivers[e]))
+
+            # ------------------------------------------------------------
+            # Update node_neighbors for edge flip (i,j) -> (k,l)
+            # ------------------------------------------------------------
+
+            def remove_neighbor(neigh, node, nbr):
+                row = neigh[node]
+                row = jnp.where(row == nbr, -1, row)
+                return neigh.at[node].set(row)
+
+            def add_neighbor(neigh, node, nbr):
+                row = neigh[node]
+                idx = jnp.argmax(row == -1)  # first free slot
+                row = row.at[idx].set(nbr)
+                return neigh.at[node].set(row)
+
+            def update_neighbors(neigh, a, b, mask, fn):
+                # applies fn(neigh, a[t], b[t]) if mask[t] is True
+                def body(t, nbh):
+                    return jax.lax.cond(
+                        mask[t],
+                        lambda x: fn(x, a[t], b[t]),
+                        lambda x: x,
+                        nbh
+                    )
+
+                return jax.lax.fori_loop(0, a.shape[0], body, neigh)
+
+            # v = e >= 0 already defined
+            node_neighbors = update_neighbors(node_neighbors, i, j, v, remove_neighbor)
+            node_neighbors = update_neighbors(node_neighbors, j, i, v, remove_neighbor)
+
+            node_neighbors = update_neighbors(node_neighbors, k, l, v, add_neighbor)
+            node_neighbors = update_neighbors(node_neighbors, l, k, v, add_neighbor)
+
+            new_faces_edges = faces_edges
+            new_faces_edges = new_faces_edges.at[fL].set(
+                jnp.where(vb, jnp.stack([e, e_lj, e_jk], axis=1), new_faces_edges[fL])
+            )
+            new_faces_edges = new_faces_edges.at[fR].set(
+                jnp.where(vb, jnp.stack([e, e_ki, e_il], axis=1), new_faces_edges[fR])
+            )
+
+            def replace_role(fs, fr, edge_ids, old_face, new_face):
+                valid_edge = edge_ids >= 0
+                fs_edge = fs[edge_ids]
+                fr_edge = fr[edge_ids]
+
+                fs_edge = jnp.where(valid_edge & (fs_edge == old_face), new_face, fs_edge)
+                fr_edge = jnp.where(valid_edge & (fr_edge == old_face), new_face, fr_edge)
+
+                fs = fs.at[edge_ids].set(fs_edge)
+                fr = fr.at[edge_ids].set(fr_edge)
+                return fs, fr
+
+
+            new_fs = face_senders.copy()
+            new_fr = face_receivers.copy()
+           # new_fs = face_senders.at[e].set(jnp.where(v, fL, face_senders[e]))
+           # new_fr = face_receivers.at[e].set(jnp.where(v, fR, face_receivers[e]))
+
+            #new_fs=face_senders.copy()
+            #new_fr = face_receivers.copy()
+
+           # new_fs, new_fr = replace_role(new_fs, new_fr, e_jk, fL, fL)
+            new_fs, new_fr = replace_role(new_fs, new_fr, e_lj, fR, fL)
+            new_fs, new_fr = replace_role(new_fs, new_fr, e_ki, fL, fR)
+          #  new_fs, new_fr = replace_role(new_fs, new_fr, e_il, fR, fR)
+
+            new_faces = frozendict({**faces, "edges": new_faces_edges})
+
+            return (
+                new_senders,
+                new_receivers,
+                new_faces,
+                new_fs,
+                new_fr,
+                new_flip_edges,
+                aggregate,
+                node_neighbors,
+            )
+
+
+
+
+
+
+
+      #  (
+      #      senders,
+      #      receivers,
+      #      faces,
+      #      face_senders,
+      #      face_receivers,
+      #      flip_edges,
+      #      aggregate,
+      #      node_neighbors,
+      #  ) = flip_edges_topology_no_conflicts(
+      #      senders,
+      #      receivers,
+      #      faces,
+      #      face_senders,
+      #      face_receivers,
+      #      flip_edges,  # (K,) padded with -1
+      #      node_neighbors,
+
+  #      )
+
+      #  (
+      #      senders,
+      #      receivers,
+      #      faces,
+      #      face_senders,
+      #      face_receivers,
+      #      flip_edges,
+      #      aggregate,
+      #      node_neighbors,
+      #      rng_key,
+      #  ) = flip_edge_fn(
+      #      senders,
+      #      receivers,
+      #      faces,
+      #      face_senders,
+      #      face_receivers,
+      #      flip_edges,  # (K,) padded with -1
+      #      node_neighbors,
+      #      rng_key,
+      #      n_node_max,
+      #  )
+
+      ##  faces = rebuild_faces_from_dual(
+       #     senders,
+       #     receivers,
+       #     face_senders,
+       #     face_receivers,
+       #     faces
+       # )
+
+
+
+      #  senders, receivers, faces, face_senders, face_receivers, aggregate, node_neighbors= apply_flips_serial(
+      #     senders,
+      #  receivers,
+      #      faces,
+      #      face_senders,
+      #      face_receivers,
+      #      flip_edges,
+      #      node_neighbors
+      #  )
+
+    #energy_after = per_flip_energy_sum(nodes["energy"], edges['energy'], faces['energy'], aggregate)
+
+
+    globals_=frozendict({**globals_,"flips_per":jnp.sum(flip_mask)/n_edge_max,"flip_edge_per":jnp.sum(jnp.int32(flip_edges>=0))/n_edge_max,"flips_acc":accepted_fraction,"E_b":jnp.sum(energy_before),"E_a":jnp.sum(energy_after)})
 
 
 

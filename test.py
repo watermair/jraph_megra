@@ -292,6 +292,7 @@ def plot_primal_dual_minimal(mesh):
     # reconstruct face centers via unique vertex extraction
     # -------------------------------------------------------
     face_centers = []
+    fid=0
     for e0, e1, e2 in face_edges:
         vids = {
             senders[e0], receivers[e0],
@@ -300,12 +301,13 @@ def plot_primal_dual_minimal(mesh):
         }
         if len(vids) != 3:
             print("DEBUG FACE:", e0, e1, e2)
+            print("  face_id", fid)
             print("  edge", e0, "=", senders[e0], receivers[e0])
             print("  edge", e1, "=", senders[e1], receivers[e1])
             print("  edge", e2, "=", senders[e2], receivers[e2])
-            edge_flip[e0]=0.5
-            edge_flip[e1]=0.5
-            edge_flip[e2]=0.5
+            edge_flip[e0]=1
+            edge_flip[e1]=1
+            edge_flip[e2]=1
 
 
             verts = {
@@ -315,6 +317,7 @@ def plot_primal_dual_minimal(mesh):
             }
             print("  unique vertices:", verts)
            # raise RuntimeError(f"Face edges {e0,e1,e2} do not define 3 unique vertices")
+        fid+=1
 
         face_centers.append(np.mean(pos[list(vids)], axis=0))
 
@@ -325,7 +328,10 @@ def plot_primal_dual_minimal(mesh):
     # -------------------------------------------------------
     fig = plt.figure()
     ax = fig.add_subplot(111, projection="3d")
-
+    edge_flip=np.zeros_like(edge_flip)
+   # edge_flip[464]= 1
+   # edge_flip[466] = 1
+   # edge_flip[479] = 1
     # primal directed arrows
     for s, r, flip in zip(senders, receivers, edge_flip):
         p1, p2 = pos[s], pos[r]
@@ -525,7 +531,7 @@ def build_meshgraph_from_trimesh(mesh):
     # ------------------------------------------------------------
     # Vertex neighbor list (1-ring), fixed size
     # ------------------------------------------------------------
-    n_neigh_max = 8
+    n_neigh_max = 12
     neigh_lists = [[] for _ in range(n_nodes)]
 
     for e in range(n_edges):
@@ -712,11 +718,12 @@ def build_meshgraph_from_trimesh(mesh):
                                "V0":4*jnp.pi/3.0,
                                "A0":4*jnp.pi/n_faces,
                                "Av0":4*jnp.pi/n_nodes,
-                               "kA":0.5,
+                               "C0":0.0,
+                               "kA":20.0,
                                "kV":0,
-                               "kT":1.,
-                               "kTh":2.,
-                               "kB":40
+                               "kT":100.,
+                               "kTh":1.,
+                               "kB":30
                                })
 
     def check_dual_orientation(face_senders, face_receivers):
@@ -757,7 +764,7 @@ def build_meshgraph_from_trimesh(mesh):
         "n_edge_max": n_edges,
         "n_face_max": n_faces,
 
-        "rng_key": jax.random.PRNGKey(43),
+        "rng_key": jax.random.PRNGKey(42),
     }
 
 
@@ -805,7 +812,7 @@ def node_geometry(sent_area, recv_area, sent_normal, recv_normal, sent_weight, r
     normal = normal / (jnp.linalg.norm(normal, axis=1)[:, None] + 1e-12)
     normal = normal * area[:, None]
 
-    volume = -jnp.sum(normal * pos, axis=1)
+    volume = jnp.sum(normal * pos, axis=1)
 
     curvature = 0.25 * (sent_weight + recv_weight)
     c2 = curvature * curvature
@@ -885,7 +892,7 @@ def mesh_geometry_fn(graph):
         area, cross = face_normal_and_area(uij)
 
 
-        energy = globals_["kA"]*(area/globals_["A0"]-1)**2
+        energy = globals_["kA"]*(area/globals_["A0"]-1)**2  #* 0
 
 
 
@@ -910,8 +917,8 @@ def mesh_geometry_fn(graph):
 
         lijs = edges["lij"] / globals_["l0"]
 
-        energy = tether_potential(lijs, l0=globals_["l0"], kT=globals_["kT"], kTh=globals_["kTh"])
-        #energy = tether_potential(lijs, lc1=0.3, lc0=1.7, r=2)
+        #energy = tether_potential(lijs, l0=globals_["l0"], kT=globals_["kT"], kTh=globals_["kTh"])
+        energy = tether_potential_trimem(lijs, lc1=0.6, lc0=1.4, r=2)
        # energy = energy * globals_["kT"] + (lijs - 1) ** 2 * 0.5*globals_["kTh"]*1e-2
 
         return frozendict({
@@ -935,13 +942,13 @@ def mesh_geometry_fn(graph):
         #sel.at[0].set(1)
         #pull=jnp.where(sel,-50.0*nodes["position"][jnp.arange((nodes["position"].shape[0])),0],jnp.zeros((nodes["position"].shape[0],)))
 
-        def gravity(position, G=0.0):
+        def gravity(position, G=0.3):
             pos_z = position[:, 2]
             return G * pos_z
 
         def wca_wall_energy(
                 x,  # (3,) particle position
-                z0=-1.1,
+                z0=-1.2,
                 sigma=0.1,  # effective particle radius
                 epsilon=0.2,  # wall strength
         ):
@@ -968,7 +975,12 @@ def mesh_geometry_fn(graph):
         gravity = gravity(nodes["position"])
         floor = wca_wall_energy(nodes["position"])
 
-        energy=-globals_["kV"]*volume+2*globals_["kB"]*c2/area*globals_["Av0"]+gravity+floor
+        energy=(-globals_["kV"]*volume
+        +2*globals_["kB"]*c2/area*globals_["Av0"]
+        +(area/globals_["Av0"]-1)**2*globals_["kA"] )
+      #  +(curvature/globals_["C0"]-1)**2*globals_["kA"])
+       # +gravity
+       # +floor)
 
         return frozendict({
             **nodes,
@@ -987,7 +999,7 @@ def mesh_geometry_fn(graph):
         curvature = nodes["curvature"]
         c2 = nodes["c2"]
 
-        energy=nodes["energy"]+edges["energy"]+faces["energy"]+(volume-globals_["V0"])**2*1
+        energy=nodes["energy"]+edges["energy"]+faces["energy"]+(volume+globals_["V0"])**2*100
 
 
         return frozendict({
@@ -1093,6 +1105,57 @@ def mesh_flip_fn(graph: gn_graph.MeshGraphsTuple,n_node_max,n_edge_max,n_face_ma
         face_mask = jnp.zeros(n_faces, dtype=bool).at[
             f_ids * face_valid
             ].set(True)
+
+        return node_mask, edge_mask, face_mask
+
+    def build_local_mask_fn(
+            aggregate,  # (K, 11)
+            n_node_max,
+            n_edge_max,
+            n_face_max,
+    ):
+        """
+        Returns:
+            node_mask : (n_node_max,) bool
+            edge_mask : (n_edge_max,) bool
+            face_mask : (n_face_max,) bool
+        """
+
+        # unpack (keep this consistent with aggregate definition!)
+        i, j, k, l, e, fL, fR, e_jk, e_ki, e_il, e_lj,_,_ = aggregate.T
+
+        # ------------------------------------------------------------
+        # nodes
+        # ------------------------------------------------------------
+        node_ids = jnp.stack([i, j, k, l], axis=1).reshape(-1)
+        node_valid = node_ids >= 0
+
+        node_mask = jnp.zeros((n_node_max,), dtype=jnp.bool_)
+        node_mask = node_mask.at[node_ids].set(
+            jnp.where(node_valid, True, node_mask[node_ids])
+        )
+
+        # ------------------------------------------------------------
+        # edges
+        # ------------------------------------------------------------
+        edge_ids = jnp.stack([e, e_jk, e_ki, e_il, e_lj], axis=1).reshape(-1)
+        edge_valid = edge_ids >= 0
+
+        edge_mask = jnp.zeros((n_edge_max,), dtype=jnp.bool_)
+        edge_mask = edge_mask.at[edge_ids].set(
+            jnp.where(edge_valid, True, edge_mask[edge_ids])
+        )
+
+        # ------------------------------------------------------------
+        # faces
+        # ------------------------------------------------------------
+        face_ids = jnp.stack([fL, fR], axis=1).reshape(-1)
+        face_valid = face_ids >= 0
+
+        face_mask = jnp.zeros((n_face_max,), dtype=jnp.bool_)
+        face_mask = face_mask.at[face_ids].set(
+            jnp.where(face_valid, True, face_mask[face_ids])
+        )
 
         return node_mask, edge_mask, face_mask
 
@@ -1557,6 +1620,747 @@ def mesh_flip_fn(graph: gn_graph.MeshGraphsTuple,n_node_max,n_edge_max,n_face_ma
 
         return new_senders, new_receivers, faces, new_fs, new_fr, aggregate, node_neighbors
 
+    def resolve_conflicts_randomized(
+            writes,  # (K, R) int32, vertex IDs, padded with -1
+            valid,  # (K,) bool
+            priority,  # (K,) float32
+            num_nodes,  # total number of vertices
+    ):
+        """
+        Randomized MIS conflict resolution with PURE VERTEX ownership.
+
+        A flip survives iff it owns ALL vertices in its write-set.
+        """
+
+        K, R = writes.shape
+
+        # ------------------------------------------------------------
+        # Flatten write-set
+        # ------------------------------------------------------------
+        resources = writes.reshape(-1)  # (K*R,)
+        op_ids = jnp.repeat(jnp.arange(K), R)  # (K*R,)
+
+        # ------------------------------------------------------------
+        # Valid entries only
+        # ------------------------------------------------------------
+        valid_flat = (resources >= 0) & jnp.repeat(valid, R)
+
+        # ------------------------------------------------------------
+        # Shift resources so 0 is reserved dummy
+        # ------------------------------------------------------------
+        resources_shifted = resources + 1  # real nodes: 1..num_nodes
+
+        resources_safe = jnp.where(valid_flat, resources_shifted, 0)
+        prios_safe = jnp.where(valid_flat, priority[op_ids], jnp.inf)
+
+        # ------------------------------------------------------------
+        # One owner per vertex
+        # ------------------------------------------------------------
+        owner_prio = jax.ops.segment_min(
+            prios_safe,
+            resources_safe,
+            num_segments=num_nodes + 1
+        )
+
+        owns = prios_safe == owner_prio[resources_safe]
+
+        # ------------------------------------------------------------
+        # Flip survives only if it owns ALL its vertices
+        # ------------------------------------------------------------
+        owns_per_op = jax.ops.segment_min(
+            owns.astype(jnp.int32),
+            op_ids,
+            num_segments=K
+        )
+
+        return owns_per_op.astype(bool)
+
+    def edge_faces(edge_ids, face_senders, face_receivers):
+        return jnp.stack(
+            [face_senders[edge_ids], face_receivers[edge_ids]],
+            axis=1
+        )
+
+    def flip_edges_topology_with_conflicts_safe(
+            senders,
+            receivers,
+            faces,
+            face_senders,
+            face_receivers,
+            flip_edges,  # (K,) padded with -1
+            node_neighbors,
+            rng_key,
+            n_node_max,
+    ):
+        """
+        Topology-safe edge flip with conflict resolution.
+
+        CRITICAL INVARIANT:
+          - Faces are NEVER mutated incrementally
+          - Faces are rebuilt globally after flips
+        """
+
+        faces_edges = faces["edges"]
+        old_s = senders
+        old_r = receivers
+        num_faces = faces_edges.shape[0]
+
+        # ============================================================
+        # 1. PRECOMPUTE AGGREGATE (unchanged logic)
+        # ============================================================
+
+        valid = flip_edges >= 0
+        e = jnp.where(valid, flip_edges, -1)
+
+        fL = jnp.where(valid, face_senders[e], -1)
+        fR = jnp.where(valid, face_receivers[e], -1)
+
+        valid &= (fL >= 0) & (fR >= 0)
+
+        i = jnp.where(valid, old_s[e], -1)
+        j = jnp.where(valid, old_r[e], -1)
+
+        def opposing_vertex(f_ids, a, b):
+            fe = faces_edges[f_ids]
+            s = old_s[fe]
+            r = old_r[fe]
+            ov = jnp.where(
+                (s != a[:, None]) & (s != b[:, None]), s,
+                jnp.where((r != a[:, None]) & (r != b[:, None]), r, -1)
+            )
+            return ov.max(axis=1)
+
+        k = opposing_vertex(fL, i, j)
+        l = opposing_vertex(fR, i, j)
+
+        quad_ok = (
+                (k >= 0) & (l >= 0) &
+                (k != l) &
+                (i != k) & (i != l) &
+                (j != k) & (j != l)
+        )
+        valid &= quad_ok
+
+        # one flip per face
+        valid &= unique_owner(valid, fL, num_faces)
+        valid &= unique_owner(valid, fR, num_faces)
+
+        def find_edge_with(f_ids, a, b):
+            fe = faces_edges[f_ids]
+            s = old_s[fe]
+            r = old_r[fe]
+            mask = ((s == a[:, None]) & (r == b[:, None])) | \
+                   ((s == b[:, None]) & (r == a[:, None]))
+            idx = jnp.argmax(mask, axis=1)
+            exists = jnp.any(mask, axis=1)
+            edge = fe[jnp.arange(fe.shape[0]), idx]
+            return jnp.where(exists, edge, -1)
+
+        e_jk = find_edge_with(fL, j, k)
+        e_ki = find_edge_with(fL, k, i)
+        e_il = find_edge_with(fR, i, l)
+        e_lj = find_edge_with(fR, l, j)
+
+        valid &= (e_jk >= 0) & (e_ki >= 0) & (e_il >= 0) & (e_lj >= 0)
+
+        def m(x): return jnp.where(valid, x, -1)
+
+        aggregate = jnp.stack(
+            [m(i), m(j), m(k), m(l),
+             m(e), m(fL), m(fR),
+             m(e_jk), m(e_ki), m(e_il), m(e_lj)],
+            axis=1
+        ).astype(jnp.int32)
+
+        # ============================================================
+        # 2. CONFLICT RESOLUTION (VERTEX-CENTRIC, SAFE)
+        # ============================================================
+
+        quad = aggregate[:, :4]
+        nbr_i = node_neighbors[quad[:, 0]]
+        nbr_j = node_neighbors[quad[:, 1]]
+        nbr_k = node_neighbors[quad[:, 2]]
+        nbr_l = node_neighbors[quad[:, 3]]
+
+        writes = jnp.concatenate([quad, nbr_i, nbr_j, nbr_k, nbr_l], axis=1)
+
+        rng_key, subkey = jax.random.split(rng_key)
+        priority = jnp.where(valid, jax.random.uniform(subkey, (valid.shape[0],)), jnp.inf)
+
+        keep = resolve_conflicts_randomized(
+            writes,
+            valid,
+            priority,
+            n_node_max,
+        )
+
+        e = jnp.where(keep, aggregate[:, 4], -1)
+        v = e >= 0
+
+        # ============================================================
+        # 3. COMMIT FLIPS (SAFE)
+        # ============================================================
+
+        i, j, k, l, _, fL, fR, e_jk, e_ki, e_il, e_lj = aggregate.T
+
+        # flip diagonal
+        senders = senders.at[e].set(jnp.where(v, k, senders[e]))
+        receivers = receivers.at[e].set(jnp.where(v, l, receivers[e]))
+
+        # update node neighbors
+        def remove_neighbor(neigh, a, b):
+            row = neigh[a]
+            row = jnp.where(row == b, -1, row)
+            return neigh.at[a].set(row)
+
+        def add_neighbor(neigh, a, b):
+            row = neigh[a]
+            idx = jnp.argmax(row == -1)
+            return neigh.at[a].set(row.at[idx].set(b))
+
+        for fn, a, b in [
+            (remove_neighbor, i, j),
+            (remove_neighbor, j, i),
+            (add_neighbor, k, l),
+            (add_neighbor, l, k),
+        ]:
+            node_neighbors = jax.lax.fori_loop(
+                0, e.shape[0],
+                lambda t, nbh: jax.lax.cond(v[t], lambda x: fn(x, a[t], b[t]), lambda x: x, nbh),
+                node_neighbors
+            )
+
+        # update dual adjacency ONLY
+        face_senders = face_senders.at[e].set(jnp.where(v, fL, face_senders[e]))
+        face_receivers = face_receivers.at[e].set(jnp.where(v, fR, face_receivers[e]))
+
+        def replace(fs, fr, edges, old, new):
+            ok = edges >= 0
+            fs_e = fs[edges]
+            fr_e = fr[edges]
+            fs = fs.at[edges].set(jnp.where(ok & (fs_e == old), new, fs_e))
+            fr = fr.at[edges].set(jnp.where(ok & (fr_e == old), new, fr_e))
+            return fs, fr
+
+        face_senders, face_receivers = replace(face_senders, face_receivers, e_jk, fL, fL)
+        face_senders, face_receivers = replace(face_senders, face_receivers, e_lj, fR, fL)
+        face_senders, face_receivers = replace(face_senders, face_receivers, e_ki, fL, fR)
+        face_senders, face_receivers = replace(face_senders, face_receivers, e_il, fR, fR)
+
+        # ============================================================
+        # 4. REBUILD FACES (MANDATORY)
+        # ============================================================
+
+      #  faces = rebuild_faces_from_dual_safe(
+      #      senders,
+      #      receivers,
+      #      face_senders,
+      #      face_receivers,
+      #      faces,
+      #  )
+
+        return (
+            senders,
+            receivers,
+            faces,
+            face_senders,
+            face_receivers,
+            e,
+            aggregate,
+            node_neighbors,
+            rng_key,
+        )
+
+    def flip_edges_topology_with_conflicts_old(
+            senders,
+            receivers,
+            faces,
+            face_senders,
+            face_receivers,
+            flip_edges,  # (K,) padded with -1
+            node_neighbors,
+            rng_key,
+            n_node_max,
+    ):
+        """
+        Like flip_edges_topology_realdeal, but:
+          - precomputes full (K,11) aggregate
+          - resolves conflicts via randomized MIS
+          - commits only non-conflicting flips
+
+        Returns:
+          new_senders,
+          new_receivers,
+          new_faces,
+          new_face_senders,
+          new_face_receivers,
+          new_flip_edges,   # (K,) post-conflict
+          aggregate,        # (K,11) post-conflict
+          node_neighbors,
+          rng_key
+        """
+
+        faces_edges = faces["edges"]
+        old_s = senders
+        old_r = receivers
+        num_faces = faces_edges.shape[0]
+
+        # ============================================================
+        # 1. PRECOMPUTE AGGREGATE (PURE, identical to original logic)
+        # ============================================================
+
+        valid = flip_edges >= 0
+        e = jnp.where(valid, flip_edges, -1)
+
+        fL = jnp.where(valid, face_senders[e], -1)
+        fR = jnp.where(valid, face_receivers[e], -1)
+
+        interior = (fL >= 0) & (fR >= 0)
+        valid &= interior
+
+        i = jnp.where(valid, old_s[e], -1)
+        j = jnp.where(valid, old_r[e], -1)
+
+        def opposing_vertex(f_ids, a, b):
+            fe = faces_edges[f_ids]
+            s = old_s[fe]
+            r = old_r[fe]
+            ov = jnp.where(
+                (s != a[:, None]) & (s != b[:, None]), s,
+                jnp.where((r != a[:, None]) & (r != b[:, None]), r, -1)
+            )
+            return ov.max(axis=1)
+
+        k = opposing_vertex(fL, i, j)
+        l = opposing_vertex(fR, i, j)
+
+        quad_ok = (
+                (k >= 0) & (l >= 0) &
+                (k != l) &
+                (i != k) & (i != l) &
+                (j != k) & (j != l)
+        )
+        valid &= quad_ok
+
+        # one flip per face (unchanged)
+        own_L = unique_owner(valid, fL, num_faces)
+        own_R = unique_owner(valid, fR, num_faces)
+        valid &= own_L & own_R
+
+        def find_edge_with(f_ids, a, b):
+            fe = faces_edges[f_ids]
+            s = old_s[fe]
+            r = old_r[fe]
+            mask = ((s == a[:, None]) & (r == b[:, None])) | \
+                   ((s == b[:, None]) & (r == a[:, None]))
+            idx = jnp.argmax(mask, axis=1)
+            exists = jnp.any(mask, axis=1)
+            edge = fe[jnp.arange(fe.shape[0]), idx]
+            return jnp.where(exists, edge, -1)
+
+        e_jk = find_edge_with(fL, j, k)
+        e_ki = find_edge_with(fL, k, i)
+        e_il = find_edge_with(fR, i, l)
+        e_lj = find_edge_with(fR, l, j)
+
+        neigh_ok = (e_jk >= 0) & (e_ki >= 0) & (e_il >= 0) & (e_lj >= 0)
+        valid &= neigh_ok
+
+        def m(x): return jnp.where(valid, x, -1)
+
+        aggregate = jnp.stack(
+            [
+                m(i), m(j), m(k), m(l),
+                m(e), m(fL), m(fR),
+                m(e_jk), m(e_ki), m(e_il), m(e_lj),
+            ],
+            axis=1
+        ).astype(jnp.int32)
+
+        # ============================================================
+        # 2. RANDOMIZED CONFLICT RESOLUTION (EDGE-ID CENTRIC)
+        # ============================================================
+
+        K = aggregate.shape[0]
+
+        edge_ids = jnp.stack(
+            [
+                aggregate[:, 4],  # e
+                aggregate[:, 7],  # e_jk
+                aggregate[:, 8],  # e_ki
+                aggregate[:, 9],  # e_il
+                aggregate[:, 10],  # e_lj
+            ],
+            axis=1
+        )  # (K, 5)
+
+        face_ids = edge_faces(edge_ids, face_senders, face_receivers)
+        face_ids = face_ids.reshape(edge_ids.shape[0], -1)  # (K, 10)
+
+        quad = aggregate[:, :4]
+        nbr_i = node_neighbors[quad[:, 0]]  # (K, M)
+        nbr_j = node_neighbors[quad[:, 1]]
+        nbr_k = node_neighbors[quad[:, 2]]
+        nbr_l = node_neighbors[quad[:, 3]]
+
+       # writes = jnp.concatenate([edge_ids, face_ids], axis=1)
+        writes = jnp.concatenate(
+            [
+                quad,  # (K, 4)
+                nbr_i,  # (K, M)
+                nbr_j,
+                nbr_k,
+                nbr_l,
+            ],
+            axis=1
+        )
+
+        rng_key, subkey = jax.random.split(rng_key)
+        priority = jax.random.uniform(subkey, (K,))
+        priority = jnp.where(valid, priority, jnp.inf)
+
+        keep = resolve_conflicts_randomized(
+            writes,
+            valid,
+            priority,
+            n_node_max,
+        )
+
+        # edge-ID–centric masking (CRITICAL)
+        new_flip_edges = jnp.where(keep, aggregate[:, 4], -1)
+       # new_flip_edges = jnp.where(~valid, new_flip_edges, -1)
+        aggregate = aggregate.at[:, 4].set(new_flip_edges)
+
+        # optionally zero out whole rows (matches original semantics)
+        mask = new_flip_edges >= 0
+        aggregate = jnp.where(mask[:, None], aggregate, -1)
+
+        # ============================================================
+        # 3. COMMIT FLIPS (IDENTICAL TO ORIGINAL APPLY LOGIC)
+        # ============================================================
+
+        (
+            i, j, k, l,
+            e, fL, fR,
+            e_jk, e_ki, e_il, e_lj
+        ) = aggregate.T
+
+        v = e >= 0
+        vb = v[:, None]
+
+        new_senders = senders.at[e].set(jnp.where(v, k, senders[e]))
+        new_receivers = receivers.at[e].set(jnp.where(v, l, receivers[e]))
+
+        # ------------------------------------------------------------
+        # Update node_neighbors for edge flip (i,j) -> (k,l)
+        # ------------------------------------------------------------
+
+        def remove_neighbor(neigh, node, nbr):
+            row = neigh[node]
+            row = jnp.where(row == nbr, -1, row)
+            return neigh.at[node].set(row)
+
+        def add_neighbor(neigh, node, nbr):
+            row = neigh[node]
+            idx = jnp.argmax(row == -1)  # first free slot
+            row = row.at[idx].set(nbr)
+            return neigh.at[node].set(row)
+
+        def update_neighbors(neigh, a, b, mask, fn):
+            # applies fn(neigh, a[t], b[t]) if mask[t] is True
+            def body(t, nbh):
+                return jax.lax.cond(
+                    mask[t],
+                    lambda x: fn(x, a[t], b[t]),
+                    lambda x: x,
+                    nbh
+                )
+
+            return jax.lax.fori_loop(0, a.shape[0], body, neigh)
+
+        # v = e >= 0 already defined
+        node_neighbors = update_neighbors(node_neighbors, i, j, v, remove_neighbor)
+        node_neighbors = update_neighbors(node_neighbors, j, i, v, remove_neighbor)
+
+        node_neighbors = update_neighbors(node_neighbors, k, l, v, add_neighbor)
+        node_neighbors = update_neighbors(node_neighbors, l, k, v, add_neighbor)
+
+        new_faces_edges = faces_edges
+        new_faces_edges = new_faces_edges.at[fL].set(
+            jnp.where(vb, jnp.stack([e, e_lj, e_jk], axis=1), new_faces_edges[fL])
+        )
+        new_faces_edges = new_faces_edges.at[fR].set(
+            jnp.where(vb, jnp.stack([e, e_ki, e_il], axis=1), new_faces_edges[fR])
+        )
+
+        def replace_role(fs, fr, edge_ids, old_face, new_face):
+            valid_edge = edge_ids >= 0
+            fs_edge = fs[edge_ids]
+            fr_edge = fr[edge_ids]
+
+            fs_edge = jnp.where(valid_edge & (fs_edge == old_face), new_face, fs_edge)
+            fr_edge = jnp.where(valid_edge & (fr_edge == old_face), new_face, fr_edge)
+
+            fs = fs.at[edge_ids].set(fs_edge)
+            fr = fr.at[edge_ids].set(fr_edge)
+            return fs, fr
+
+        new_fs = face_senders.copy()
+        new_fr = face_receivers.copy()
+      #  new_fs = face_senders.at[e].set(jnp.where(v, fL, face_senders[e]))
+      #  new_fr = face_receivers.at[e].set(jnp.where(v, fR, face_receivers[e]))
+
+       # new_fs = face_senders.copy()
+       # new_fr = face_receivers.copy()
+
+       # new_fs, new_fr = replace_role(new_fs, new_fr, e_jk, fL, fL)
+        new_fs, new_fr = replace_role(new_fs, new_fr, e_lj, fR, fL)
+        new_fs, new_fr = replace_role(new_fs, new_fr, e_ki, fL, fR)
+        #new_fs, new_fr = replace_role(new_fs, new_fr, e_il, fR, fR)
+
+
+        new_faces = frozendict({**faces, "edges": new_faces_edges})
+
+        return (
+            new_senders,
+            new_receivers,
+            new_faces,
+            new_fs,
+            new_fr,
+            new_flip_edges,
+            aggregate,
+            node_neighbors,
+            rng_key,
+        )
+
+    def flip_edges_topology_with_conflicts_err(
+            senders,
+            receivers,
+            faces,
+            face_senders,
+            face_receivers,
+            flip_edges,  # (K,) padded with -1
+            node_neighbors,
+            rng_key,
+            n_edge_max,
+            n_face_max,
+    ):
+        """
+        Identical semantics to flip_edges_topology_with_conflicts,
+        but GUARANTEES index safety:
+          - no scatter sees -1 indices
+          - masked flips are truly no-ops
+        """
+
+        faces_edges = faces["edges"]
+        old_s = senders
+        old_r = receivers
+        num_faces = faces_edges.shape[0]
+
+        # ============================================================
+        # 1. PRECOMPUTE AGGREGATE (UNCHANGED LOGIC)
+        # ============================================================
+
+        valid = flip_edges >= 0
+        e = jnp.where(valid, flip_edges, -1)
+
+        fL = jnp.where(valid, face_senders[e], -1)
+        fR = jnp.where(valid, face_receivers[e], -1)
+        valid &= (fL >= 0) & (fR >= 0)
+
+        i = jnp.where(valid, old_s[e], -1)
+        j = jnp.where(valid, old_r[e], -1)
+
+        def opposing_vertex(f_ids, a, b):
+            fe = faces_edges[f_ids]
+            s = old_s[fe]
+            r = old_r[fe]
+            ov = jnp.where(
+                (s != a[:, None]) & (s != b[:, None]), s,
+                jnp.where((r != a[:, None]) & (r != b[:, None]), r, -1)
+            )
+            return ov.max(axis=1)
+
+        k = opposing_vertex(fL, i, j)
+        l = opposing_vertex(fR, i, j)
+
+        valid &= (
+                (k >= 0) & (l >= 0) &
+                (k != l) &
+                (i != k) & (i != l) &
+                (j != k) & (j != l)
+        )
+
+        own_L = unique_owner(valid, fL, num_faces)
+        own_R = unique_owner(valid, fR, num_faces)
+        valid &= own_L & own_R
+
+        def find_edge_with(f_ids, a, b):
+            fe = faces_edges[f_ids]
+            s = old_s[fe]
+            r = old_r[fe]
+            mask = ((s == a[:, None]) & (r == b[:, None])) | \
+                   ((s == b[:, None]) & (r == a[:, None]))
+            idx = jnp.argmax(mask, axis=1)
+            exists = jnp.any(mask, axis=1)
+            edge = fe[jnp.arange(fe.shape[0]), idx]
+            return jnp.where(exists, edge, -1)
+
+        e_jk = find_edge_with(fL, j, k)
+        e_ki = find_edge_with(fL, k, i)
+        e_il = find_edge_with(fR, i, l)
+        e_lj = find_edge_with(fR, l, j)
+
+        valid &= (e_jk >= 0) & (e_ki >= 0) & (e_il >= 0) & (e_lj >= 0)
+
+        def m(x): return jnp.where(valid, x, -1)
+
+        aggregate = jnp.stack(
+            [m(i), m(j), m(k), m(l),
+             m(e), m(fL), m(fR),
+             m(e_jk), m(e_ki), m(e_il), m(e_lj)],
+            axis=1
+        ).astype(jnp.int32)
+
+        # ============================================================
+        # 2. RANDOMIZED CONFLICT RESOLUTION (UNCHANGED)
+        # ============================================================
+
+        quad = aggregate[:, :4]
+        nbr_i = node_neighbors[quad[:, 0]]
+        nbr_j = node_neighbors[quad[:, 1]]
+        nbr_k = node_neighbors[quad[:, 2]]
+        nbr_l = node_neighbors[quad[:, 3]]
+
+        writes = jnp.concatenate(
+            [quad, nbr_i, nbr_j, nbr_k, nbr_l],
+            axis=1
+        )
+
+        rng_key, subkey = jax.random.split(rng_key)
+        priority = jax.random.uniform(subkey, (aggregate.shape[0],))
+        priority = jnp.where(valid, priority, jnp.inf)
+
+        keep = resolve_conflicts_randomized(
+            writes,
+            valid,
+            priority,
+            n_node_max,
+        )
+
+        new_flip_edges = jnp.where(keep, aggregate[:, 4], -1)
+        aggregate = aggregate.at[:, 4].set(new_flip_edges)
+        aggregate = jnp.where(new_flip_edges[:, None] >= 0, aggregate, -1)
+
+        # ============================================================
+        # 3. COMMIT FLIPS (FULLY INDEX-SAFE)
+        # ============================================================
+
+        (
+            i, j, k, l,
+            e, fL, fR,
+            e_jk, e_ki, e_il, e_lj
+        ) = aggregate.T
+
+        v = e >= 0
+        vb = v[:, None]
+
+        # ---- SAFE INDICES (CRITICAL) ----
+        safe_e = jnp.where(v, e, 0)
+        safe_fL = jnp.where(v, fL, 0)
+        safe_fR = jnp.where(v, fR, 0)
+        safe_jk = jnp.where(v, e_jk, 0)
+        safe_ki = jnp.where(v, e_ki, 0)
+        safe_il = jnp.where(v, e_il, 0)
+        safe_lj = jnp.where(v, e_lj, 0)
+
+        new_senders = senders.at[safe_e].set(
+            jnp.where(v, k, senders[safe_e])
+        )
+        new_receivers = receivers.at[safe_e].set(
+            jnp.where(v, l, receivers[safe_e])
+        )
+
+        # ---- node neighbors ----
+        def remove_neighbor(neigh, node, nbr):
+            row = neigh[node]
+            row = jnp.where(row == nbr, -1, row)
+            return neigh.at[node].set(row)
+
+        def add_neighbor(neigh, node, nbr):
+            row = neigh[node]
+            idx = jnp.argmax(row == -1)
+            row = row.at[idx].set(nbr)
+            return neigh.at[node].set(row)
+
+        def update_neighbors(neigh, a, b, mask, fn):
+            def body(t, nbh):
+                return jax.lax.cond(
+                    mask[t],
+                    lambda x: fn(x, a[t], b[t]),
+                    lambda x: x,
+                    nbh
+                )
+
+            return jax.lax.fori_loop(0, a.shape[0], body, neigh)
+
+        node_neighbors = update_neighbors(node_neighbors, i, j, v, remove_neighbor)
+        node_neighbors = update_neighbors(node_neighbors, j, i, v, remove_neighbor)
+        node_neighbors = update_neighbors(node_neighbors, k, l, v, add_neighbor)
+        node_neighbors = update_neighbors(node_neighbors, l, k, v, add_neighbor)
+
+        # ---- faces["edges"] ----
+        new_faces_edges = faces_edges
+        new_faces_edges = new_faces_edges.at[safe_fL].set(
+            jnp.where(vb, jnp.stack([e, e_lj, e_jk], axis=1),
+                      new_faces_edges[safe_fL])
+        )
+        new_faces_edges = new_faces_edges.at[safe_fR].set(
+            jnp.where(vb, jnp.stack([e, e_ki, e_il], axis=1),
+                      new_faces_edges[safe_fR])
+        )
+
+        # ---- dual adjacency ----
+        def replace_role(fs, fr, edge_ids, old_face, new_face):
+            valid_edge = edge_ids >= 0
+            safe_edge = jnp.where(valid_edge, edge_ids, 0)
+
+            fs_e = fs[safe_edge]
+            fr_e = fr[safe_edge]
+
+            fs_e = jnp.where(valid_edge & (fs_e == old_face), new_face, fs_e)
+            fr_e = jnp.where(valid_edge & (fr_e == old_face), new_face, fr_e)
+
+            fs = fs.at[safe_edge].set(fs_e)
+            fr = fr.at[safe_edge].set(fr_e)
+            return fs, fr
+
+        new_fs = face_senders.at[safe_e].set(
+            jnp.where(v, fL, face_senders[safe_e])
+        )
+        new_fr = face_receivers.at[safe_e].set(
+            jnp.where(v, fR, face_receivers[safe_e])
+        )
+
+        new_fs, new_fr = replace_role(new_fs, new_fr, e_jk, fL, fL)
+        new_fs, new_fr = replace_role(new_fs, new_fr, e_lj, fR, fL)
+        new_fs, new_fr = replace_role(new_fs, new_fr, e_ki, fL, fR)
+        new_fs, new_fr = replace_role(new_fs, new_fr, e_il, fR, fR)
+
+        new_faces = frozendict({**faces, "edges": new_faces_edges})
+
+        return (
+            new_senders,
+            new_receivers,
+            new_faces,
+            new_fs,
+            new_fr,
+            new_flip_edges,
+            aggregate,
+            node_neighbors,
+            rng_key,
+        )
+
     def update_edge_local_fn(edges,  senders, receivers,edge_mask, globals_):
 
         pos_s = senders["position"]
@@ -1576,7 +2380,7 @@ def mesh_flip_fn(graph: gn_graph.MeshGraphsTuple,n_node_max,n_edge_max,n_face_ma
 
         area, cross = face_normal_and_area(uij)
 
-        energy = globals_["kA"] * (area/globals_["A0"] - 1) ** 2
+        energy = globals_["kA"] * (area/globals_["A0"] - 1) ** 2 #* 0
 
         return frozendict({
             **faces,
@@ -1598,8 +2402,8 @@ def mesh_flip_fn(graph: gn_graph.MeshGraphsTuple,n_node_max,n_edge_max,n_face_ma
 
 
         lijs = edges["lij"] / globals_["l0"]
-        #energy = tether_potential(lijs, lc1=0.3, lc0=1.7, r=2)
-        energy=tether_potential(lijs, l0=globals_["l0"], kT=globals_["kT"], kTh=globals_["kTh"])
+        energy = tether_potential_trimem(lijs, lc1=0.6, lc0=1.4, r=2)
+        #energy=tether_potential(lijs, l0=globals_["l0"], kT=globals_["kT"], kTh=globals_["kTh"])
         #energy = energy * globals_["kT"] + (lijs - 1) ** 2 * 0.5*globals_["kTh"]*1e-2
 
         return frozendict({
@@ -1619,7 +2423,11 @@ def mesh_flip_fn(graph: gn_graph.MeshGraphsTuple,n_node_max,n_edge_max,n_face_ma
             nodes["position"]
         )
 
-        energy = -globals_["kV"] * volume + 2*globals_["kB"] * c2/area*globals_["Av0"]
+        energy = (-globals_["kV"] * volume
+                  + 2*globals_["kB"] * c2/area*globals_["Av0"]
+                  + (area / globals_["Av0"] - 1) ** 2 * globals_["kA"] )
+                #  + (curvature / globals_["C0"] - 1) ** 2 * globals_["kA"]
+                  #)
 
         return frozendict({
             **nodes,
@@ -1681,7 +2489,53 @@ def mesh_flip_fn(graph: gn_graph.MeshGraphsTuple,n_node_max,n_edge_max,n_face_ma
 
         return rollback_edges, acceptance_fraction,rng_key
 
+    def metropolis_fn_masked(
+            flip_mask,
+            E_before,
+            E_after,
+            beta,
+            rng_key,
+    ):
+        """
+        flip_mask:        (K,) bool     # which aggregates were applied
+        E_before:         (K,) float
+        E_after:          (K,) float
+        beta:             float
+        rng_key:          PRNGKey
 
+        Returns:
+            rollback_mask:        (K,) bool   # True => undo this flip
+            acceptance_fraction: float        # in [0, 1]
+            rng_key:             PRNGKey
+        """
+
+        # only Metropolis-test actually executed flips
+        valid = flip_mask
+
+        dE = E_after - E_before
+
+        rng_key, subkey = jax.random.split(rng_key)
+        u = jax.random.uniform(subkey, shape=dE.shape)
+
+        # Metropolis criterion
+        accept = (dE <= 0.0) | (jnp.exp(-beta * dE) > u)
+
+        accept_valid = accept & valid
+
+        # statistics
+        n_valid = jnp.sum(valid)
+        n_accept = jnp.sum(accept_valid)
+
+        acceptance_fraction = jnp.where(
+            n_valid > 0,
+            n_accept.astype(jnp.float32) / n_valid.astype(jnp.float32),
+            0.0
+        )
+
+        # rollback where we flipped but did not accept
+        rollback_mask = valid & (~accept)
+
+        return rollback_mask, acceptance_fraction, rng_key
 
     def update_global_fn(nodes, edges,faces, globals_):
         return frozendict({**globals_})
@@ -1696,13 +2550,13 @@ def mesh_flip_fn(graph: gn_graph.MeshGraphsTuple,n_node_max,n_edge_max,n_face_ma
         update_edge_from_face_selection_fn=update_edge_from_face_fn,
         update_face_preselection_fn=update_face_preselection_fn,
         # FLIP FUNCTION
-        flip_edge_fn=flip_edges_topology_realdeal,
+        flip_edge_fn=flip_edges_topology_with_conflicts_old,
         #LOCAL ENERGY RECOMPUTE
         update_edge_local_fn=update_edge_local_fn,
         update_face_local_fn=update_face_local_fn,
         update_edge_from_face_local_fn=update_edge_from_face_local_fn,
         update_node_local_fn=update_node_local_fn,
-        build_local_mask_fn=build_masks,
+        build_local_mask_fn=build_local_mask_fn,
         #
         metropolis_fn=metropolis_fn,
 
@@ -1900,7 +2754,17 @@ def brownian_dynamics_integrator(
     rng_key, subkey = jax.random.split(rng_key)
     noise = jax.random.normal(subkey, shape=position.shape)
 
-    next_position = position + (dposition_dt / gamma) * time_step + sigma * jnp.sqrt(time_step) * noise
+    dr=(dposition_dt / gamma) * time_step
+
+    max_val = 0.05  # desired max |dr[i]|
+
+    norm = jnp.linalg.norm(dr, axis=1, keepdims=True)
+    scale = jnp.minimum(1.0, max_val / (norm + 1e-12))
+    dr_clipped = dr * scale
+
+
+
+    next_position = position + dr_clipped + sigma * jnp.sqrt(time_step) * noise
 
     # Momentum is unchanged in overdamped limit
     return next_position, rng_key, next_graph
@@ -2016,12 +2880,12 @@ def write_mesh_vtk(meshgraph, filename, binary=False):
 
 next_key=jax.random.PRNGKey(42)
 time_step=1.e-6
-temperature=0.00
+temperature=0.
 gamma0=1.0
 
 
 ### BUILD INITIAL STATE FROM TRIMESH
-mesh = trimesh.creation.icosphere(subdivisions=3, radius=1.0)
+mesh = trimesh.creation.icosphere(subdivisions=2, radius=1.0)
 
 #mesh = trimesh.creation.icosahedron(subdivisions=5, radius=1.0)
 
@@ -2065,7 +2929,7 @@ mesh_geometry_jitted=jax.jit(mesh_geometry_fn)
 meshgraph=mesh_geometry_jitted(meshgraph)
 
 
-dosteps_geom=5
+dosteps_geom=1
 def step_geometry(carry, _):
     new_carry = mesh_geometry_jitted(carry)
     return new_carry, None
@@ -2078,15 +2942,18 @@ def step_geometry(carry, _):
 globals_=meshgraph.globals
 
 globals_=frozendict({**meshgraph.globals,
-                     "V0":meshgraph.globals["volume"]*0.55,
-                     "A0":jnp.mean(meshgraph.faces["area"]),
+                     "V0":meshgraph.globals["volume"]*1,
+                     "A0":jnp.mean(meshgraph.faces["area"]*6),
                      "l0":jnp.mean(meshgraph.edges['lij']),
-                     "Av0":jnp.mean(meshgraph.nodes["area"])}
-
+                     "Av0":jnp.mean(meshgraph.nodes["area"]),
+                     "C0":jnp.mean(meshgraph.nodes["curvature"])}
                     )
-meshgraph._replace(globals=globals_)
 
 
+print(f"before: V0: {globals_["V0"]}, A0: {globals_["A0"]}, l0: {globals_["l0"]}, Av0: {globals_["Av0"]},")
+meshgraph=meshgraph._replace(globals=globals_)
+
+print(f"after: V0: {meshgraph.globals["V0"]}, A0: {meshgraph.globals["A0"]}, l0: {meshgraph.globals["l0"]}, Av0: {meshgraph.globals["Av0"]},")
 #### BUILD FLIP FUNCTIONS
 
 mesh_flip_jitted=jax.jit(mesh_flip_fn,static_argnums=(1,2,3))
@@ -2121,18 +2988,43 @@ for i in range(0):
 
 
 
-
+s0=meshgraph.senders
+fs0=meshgraph.face_senders
 dosteps=10000
 accep=0
 #write_mesh_vtk(meshgraph, f"mesh_00000.vtu")
+nr=1
+i=0
+write_mesh_vtk(meshgraph, f"mesh_{i:05d}.vtk",binary=False)
 for i in range(dosteps):
-    for j in range(1000):
+    for j in range(100):
 
        _, _, key, meshgraph = step_fn_graph(meshgraph, time_step, gamma0, temperature, next_key)
        next_key, key = jax.random.split(key)
-       if j % 10==0:
+       if j % 5==0:
       # for k in range(1):
            meshgraph = mesh_flip_jitted_static(meshgraph)
+       # boolean condition per edge
+         #  ok = (meshgraph.face_senders == fs0) | (meshgraph.face_receivers == fs0)
+
+            # indices where condition fails
+         #  bad_idx = jnp.nonzero(~ok, size=ok.size, fill_value=-1)[0]
+
+            # count real failures
+         #  n_bad = jnp.sum(~ok)
+
+         #  if n_bad > 0:
+         #      print("error NR:", nr )
+         #      print("Mismatch at indices:", bad_idx[:n_bad])
+         #      print("s0 values:", s0[bad_idx[:n_bad]])
+         #      print("senders:", meshgraph.senders[bad_idx[:n_bad]])
+         #      print("receivers:", meshgraph.receivers[bad_idx[:n_bad]])
+         #      print("face senders:", meshgraph.face_senders[bad_idx[:n_bad]])
+         #      print("face receivers:", meshgraph.face_receivers[bad_idx[:n_bad]])
+         #      fs0=meshgraph.face_senders
+         #      nr+=1
+
+              # raise AssertionError(f"{n_bad} edges violate sender/receiver invariant")
          #  meshgraph = mesh_geometry_jitted(meshgraph)
 
            accep+=meshgraph.globals["flips_acc"]
@@ -2143,12 +3035,14 @@ for i in range(dosteps):
     #globals_=frozendict({**meshgraph.globals,"V0":0.999*meshgraph.globals["V0"]})
     #meshgraph._replace(globals=globals_)
     if i % 1 == 0:
-       # if i==36:
-       #     plot_primal_dual_minimal(meshgraph)print("selected edges per: ",meshgraph.globals["flips_per"]," accepted proposed flips per:",meshgraph.globals["flips_acc"])
-        print("selected edges per: ",meshgraph.globals["flips_per"]," accepted proposed flips per:",meshgraph.globals["flips_acc"])
+        assert jnp.all(meshgraph.face_senders != meshgraph.face_receivers)
+        if i==250:
+            plot_primal_dual_minimal(meshgraph)#print("selected edges per: ",meshgraph.globals["flips_per"]," accepted proposed flips per:",meshgraph.globals["flips_acc"])
+        print("selected edges per: ",meshgraph.globals["flips_per"]," accepted proposed flips per:",meshgraph.globals["flips_acc"]," flip_edges_per: ",meshgraph.globals["flip_edge_per"])
 
         print(f"E_b:{meshgraph.globals["E_b"]}, E_a:{meshgraph.globals["E_a"]}")
-        write_mesh_vtk(meshgraph, f"mesh_{i:05d}.vtk",binary=False)
+        write_mesh_vtk(meshgraph, f"mesh_{i+1:05d}.vtk",binary=False)
+
 
 
 
