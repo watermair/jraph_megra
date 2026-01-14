@@ -705,13 +705,11 @@ def build_meshgraph_from_trimesh(mesh):
 
 
 
-    nodes = frozendict({"position": jnp.asarray(vertices),"flip_id":jnp.zeros((vertices.shape[0],))})
+
     edges = frozendict({})
 
     faces_dict = frozendict({
-        "vertices": jnp.asarray(face_vertices),
-        "edges":jnp.asarray(face_edges),
-        "edge_orientation":jnp.asarray(face_edge_orientation)
+
     })
 
     globals_dict = frozendict({"l0":jnp.mean(jnp.linalg.norm(vertices[senders]-vertices[receivers],axis=1)),
@@ -719,11 +717,20 @@ def build_meshgraph_from_trimesh(mesh):
                                "A0":4*jnp.pi/n_faces,
                                "Av0":4*jnp.pi/n_nodes,
                                "C0":0.0,
-                               "kA":20.0,
+                               "kA":5.0,
                                "kV":0,
-                               "kT":100.,
+                               "kT":5.,
                                "kTh":1.,
-                               "kB":30
+                               "kB":30,
+                               "energy":0.0,
+                               "area":0.0,
+                               "volume":0.0,
+                               "curvature":0.0,
+                              "flips_per": 0.0,
+                               "flip_edge_per": 0.0,
+                               "flips_acc": 0.0,
+                               "E_b": 0.0,
+                               "E_a": 0.0
                                })
 
     def check_dual_orientation(face_senders, face_receivers):
@@ -734,38 +741,222 @@ def build_meshgraph_from_trimesh(mesh):
     assert np.all(face_receivers >= -1)
     assert np.all(face_senders != face_receivers)
 
-    node_mask=jnp.ones((n_nodes,))
+    def pad_last(x, pad_width=1):
+        pad_shape = list(x.shape)
+        pad_shape[0] = pad_width
+        return jnp.concatenate([x, jnp.zeros(pad_shape, dtype=x.dtype)], axis=0)
+
+    def make_meshgraph_with_padding(
+            vertices,
+            node_neighbors,
+            edges,
+            faces_dict,
+            senders,
+            receivers,
+            face_senders,
+            face_receivers,
+            face_vertices,
+            globals_dict,
+    ):
+        n_nodes = vertices.shape[0]
+        n_edges = senders.shape[0]
+        n_faces = face_vertices.shape[0]
+
+        # ------------------------------------------------------------------
+        # padded sizes
+        # ------------------------------------------------------------------
+        n_node_max = n_nodes + 1
+        n_edge_max = n_edges + 1
+        n_face_max = n_faces + 1
+
+        PAD_NODE = n_nodes
+        PAD_EDGE = n_edges
+        PAD_FACE = n_faces
+
+        # ------------------------------------------------------------------
+        # masks (dummy entry = 0 / inactive)
+        # ------------------------------------------------------------------
+        node_mask = pad_last(jnp.ones((n_nodes,), dtype=jnp.int32))
+        edge_mask = pad_last(jnp.ones((n_edges,), dtype=jnp.int32))
+        face_mask = pad_last(jnp.ones((n_faces,), dtype=jnp.int32))
+
+        # ------------------------------------------------------------------
+        # nodes
+        # ------------------------------------------------------------------
+        nodes = frozendict({
+            "mask": node_mask,
+            "flip_id": pad_last(jnp.zeros((n_nodes,))),
+            "neighbors": pad_last(jnp.asarray(node_neighbors)),
+            "position": pad_last(jnp.asarray(vertices, dtype=jnp.float64)),
+            "rn_min": pad_last(jnp.zeros((n_nodes,))),
+
+            "area": pad_last(jnp.ones((n_nodes,))),
+            "normal": pad_last(jnp.zeros((n_nodes, 3), dtype=jnp.float64)),
+            "volume": pad_last(jnp.zeros((n_nodes,))),
+            "curvature": pad_last(jnp.zeros((n_nodes,))),
+            "c2": pad_last(jnp.zeros((n_nodes,))),
+            "energy": pad_last(jnp.zeros((n_nodes,))),
+            "energy_ext": pad_last(jnp.zeros((n_nodes,))),
+        })
+
+        # ------------------------------------------------------------------
+        # edges
+        # ------------------------------------------------------------------
+        edges = frozendict({
+            **edges,
+            "mask": edge_mask,
+            "uij": pad_last(jnp.ones((n_edges, 3))),
+            "lij": pad_last(jnp.ones((n_edges,))),
+            "area": pad_last(jnp.ones((n_edges,))),
+            "weight": pad_last(jnp.ones((n_edges,))),
+            "normal": pad_last(jnp.ones((n_edges, 3))),
+            "energy": pad_last(jnp.ones((n_edges,))),
+            "rn": pad_last(jnp.zeros((n_edges,))),
+            "rn_min": pad_last(jnp.zeros((n_edges,))),
+        })
+
+        # ------------------------------------------------------------------
+        # faces
+        # ------------------------------------------------------------------
+        faces_dict = frozendict({
+            **faces_dict,
+            "vertices": pad_last(jnp.asarray(face_vertices)),
+            "edges": pad_last(jnp.asarray(face_edges)).at[-1,:].set(-1),
+            "edge_orientation": pad_last(jnp.asarray(face_edge_orientation)),
+
+            "mask": face_mask,
+            "area": pad_last(jnp.ones((n_faces,))),
+            "normal": pad_last(jnp.zeros((n_faces, 3))),
+            "energy": pad_last(jnp.zeros((n_faces,))),
+            "rn": pad_last(jnp.zeros((n_faces,))),
+            "rn_min": pad_last(jnp.zeros((n_faces,))),
+        })
+
+        # ------------------------------------------------------------------
+        # incidence arrays (pad with dummy index)
+        # ------------------------------------------------------------------
+        senders = pad_last(jnp.asarray(senders))
+        receivers = pad_last(jnp.asarray(receivers))
+        face_senders = pad_last(jnp.asarray(face_senders))
+        face_receivers = pad_last(jnp.asarray(face_receivers))
+        face_vertices = pad_last(jnp.asarray(face_vertices))
+
+        senders=senders.at[-1].set(-1)
+        receivers=receivers.at[-1].set(-1)
+        face_senders=face_senders.at[-1].set(-1)
+        face_receivers=face_receivers.at[-1].set(-1)
+
+
+        # ------------------------------------------------------------------
+        # final graph
+        # ------------------------------------------------------------------
+        return {
+            "nodes": nodes,
+            "edges": edges,
+            "faces": faces_dict,
+
+            "senders": senders,
+            "receivers": receivers,
+
+            "face_senders": face_senders,
+            "face_receivers": face_receivers,
+            "face_vertices": face_vertices,
+
+            "globals": globals_dict,
+
+            "n_node": jnp.asarray([n_nodes]),
+            "n_edge": jnp.asarray([n_edges]),
+            "n_face": jnp.asarray([n_faces]),
+
+            "n_node_max": n_node_max,
+            "n_edge_max": n_edge_max,
+            "n_face_max": n_face_max,
+
+       #     "PAD_NODE": PAD_NODE,
+       #     "PAD_EDGE": PAD_EDGE,
+       #     "PAD_FACE": PAD_FACE,
+
+            "rng_key": jax.random.PRNGKey(42),
+        }
+
+    node_mask= jnp.ones((n_nodes,))
     face_mask = jnp.ones((n_faces,))
     edge_mask = jnp.ones((n_edges,))
 
-    nodes = frozendict({**nodes, "mask": node_mask,"area":jnp.zeros((n_nodes,)),"volume":jnp.zeros((n_nodes,)),"curvature":jnp.zeros((n_nodes,)),"c2":jnp.zeros((n_nodes,)),"energy":jnp.zeros((n_nodes,)),"normal":jnp.zeros((n_nodes,3)),"neighbors": jnp.asarray(node_neighbors)})
-    edges = frozendict({**edges, "mask": edge_mask,"uij":jnp.ones((n_edges,3)),"lij":jnp.ones((n_edges,)),"area":jnp.ones((n_edges,)),"weight":jnp.ones((n_edges,)),"normal":jnp.ones((n_edges,3)),"energy":jnp.ones((n_edges,))})
-    faces_dict = frozendict({**faces_dict, "mask": face_mask,"area":jnp.zeros((n_faces,)),"normal":jnp.zeros((n_faces,3)),"energy":jnp.zeros((n_faces,))})
 
-    return {
-        "nodes": nodes,
-        "edges": edges,
 
-        "faces": faces_dict,
+    nodes = frozendict({
+                        "mask": node_mask,
+                        "flip_id": jnp.zeros((vertices.shape[0],)),
+                        "neighbors": jnp.asarray(node_neighbors),
+                        "position": jnp.asarray(vertices,dtype=jnp.float64),
+                        "rn_min": jnp.zeros((vertices.shape[0],)),
+                "area": jnp.zeros((n_nodes,)),
+        "normal": jnp.zeros((n_nodes, 3), dtype=jnp.float64),
+        "volume": jnp.zeros((n_nodes,)),
+        "curvature": jnp.zeros((n_nodes,)),
+        "c2": jnp.zeros((n_nodes,)),
+        "energy": jnp.zeros((n_nodes,)),
+        "energy_ext": jnp.zeros((n_nodes,)),
 
-        "senders": jnp.asarray(senders),
-        "receivers": jnp.asarray(receivers),
+                        })
 
-        "face_senders": jnp.asarray(face_senders),
-        "face_receivers": jnp.asarray(face_receivers),
-        "face_vertices":jnp.asarray(face_vertices),
+    #nodes_sum
+    edges = frozendict({**edges,
+                        "mask": edge_mask,
+                        "uij":jnp.ones((n_edges,3)),
+                        "lij":jnp.ones((n_edges,)),
+                        "area":jnp.ones((n_edges,)),
+                        "weight":jnp.ones((n_edges,)),
+                        "normal":jnp.ones((n_edges,3)),
+                        "energy":jnp.ones((n_edges,)),
+                        "rn":jnp.zeros((n_edges,)),
+                        "rn_min":jnp.zeros((n_edges,))})
 
-        "globals": globals_dict,
 
-        "n_node": jnp.asarray([n_nodes]),
-        "n_edge": jnp.asarray([n_edges]),
-        "n_face": jnp.asarray([n_faces]),
-        "n_node_max": n_nodes,
-        "n_edge_max": n_edges,
-        "n_face_max": n_faces,
+    faces_dict = frozendict({**faces_dict,
+                             "mask": face_mask,
+                             "area":jnp.zeros((n_faces,)),
+                             "normal":jnp.zeros((n_faces,3)),
+                             "energy":jnp.zeros((n_faces,)),
+                             "rn":jnp.zeros((n_faces,)),
+                             "rn_min":jnp.zeros((n_faces,))})
 
-        "rng_key": jax.random.PRNGKey(42),
-    }
+  #  return {
+  #      "nodes": nodes,
+  #      "edges": edges,
+
+  #      "faces": faces_dict,
+
+   #     "senders": jnp.asarray(senders),
+   #     "receivers": jnp.asarray(receivers),
+
+   #     "face_senders": jnp.asarray(face_senders),
+   #     "face_receivers": jnp.asarray(face_receivers),
+   #     "face_vertices":jnp.asarray(face_vertices),
+
+    #    "globals": globals_dict,
+
+     #   "n_node": jnp.asarray([n_nodes]),
+     #   "n_edge": jnp.asarray([n_edges]),
+     #   "n_face": jnp.asarray([n_faces]),
+
+   #     "n_node_max": n_nodes,
+   #     "n_edge_max": n_edges,
+   #     "n_face_max": n_faces,
+
+    #    "rng_key": jax.random.PRNGKey(42),
+    #}
+    return make_meshgraph_with_padding(vertices,
+            node_neighbors,
+            edges,
+            faces_dict,
+            senders,
+            receivers,
+            face_senders,
+            face_receivers,
+            face_vertices,
+            globals_dict)
 
 
 
@@ -877,6 +1068,9 @@ def mesh_geometry_fn(graph):
 
         uij, lij = edge_vectors(pos_s, pos_r)
 
+        uij=uij.at[-1].set(0.0)
+        lij = lij.at[-1].set(0.0)
+
         return frozendict({
             **edges,
             "uij": jnp.where(edge_mask[:, None], uij, edges["uij"]),
@@ -894,7 +1088,9 @@ def mesh_geometry_fn(graph):
 
         energy = globals_["kA"]*(area/globals_["A0"]-1)**2  #* 0
 
-
+        area=area.at[-1].set(0.0)
+        cross=cross.at[-1, :].set(0.0)
+        energy=energy.at[-1].set(0.0)
 
         return frozendict({
             **faces,
@@ -917,8 +1113,13 @@ def mesh_geometry_fn(graph):
 
         lijs = edges["lij"] / globals_["l0"]
 
-        #energy = tether_potential(lijs, l0=globals_["l0"], kT=globals_["kT"], kTh=globals_["kTh"])
-        energy = tether_potential_trimem(lijs, lc1=0.6, lc0=1.4, r=2)
+        energy = tether_potential(lijs, l0=globals_["l0"], kT=globals_["kT"], kTh=globals_["kTh"])
+
+        area=area.at[-1].set(0.0)
+        normal=normal.at[-1,:].set(0.0)
+        weight=weight.at[-1].set(0.0)
+        energy=energy.at[-1].set(0.0)
+        #energy = tether_potential_trimem(lijs, lc1=0.6, lc0=1.4, r=2)
        # energy = energy * globals_["kT"] + (lijs - 1) ** 2 * 0.5*globals_["kTh"]*1e-2
 
         return frozendict({
@@ -942,7 +1143,7 @@ def mesh_geometry_fn(graph):
         #sel.at[0].set(1)
         #pull=jnp.where(sel,-50.0*nodes["position"][jnp.arange((nodes["position"].shape[0])),0],jnp.zeros((nodes["position"].shape[0],)))
 
-        def gravity(position, G=0.3):
+        def gravity(position, G=1.0):
             pos_z = position[:, 2]
             return G * pos_z
 
@@ -950,7 +1151,7 @@ def mesh_geometry_fn(graph):
                 x,  # (3,) particle position
                 z0=-1.2,
                 sigma=0.1,  # effective particle radius
-                epsilon=0.2,  # wall strength
+                epsilon=0.5,  # wall strength
         ):
             """
             WCA hard wall at z = 0.
@@ -977,10 +1178,21 @@ def mesh_geometry_fn(graph):
 
         energy=(-globals_["kV"]*volume
         +2*globals_["kB"]*c2/area*globals_["Av0"]
-        +(area/globals_["Av0"]-1)**2*globals_["kA"] )
+        +(area/globals_["Av0"]-1)**2*globals_["kA"])
+
+        energy_ext= gravity +floor               # external potential contributions invariant under flipping
+             #   )
       #  +(curvature/globals_["C0"]-1)**2*globals_["kA"])
-       # +gravity
-       # +floor)
+
+        area=area.at[-1].set(0.0)
+        normal=normal.at[-1, :].set(0.0)
+        energy=energy.at[-1].set(0.0)
+        energy_ext=energy_ext.at[-1].set(0.0)
+        volume=volume.at[-1].set(0.0)
+        area=area.at[-1].set(0.0)
+        curvature=curvature.at[-1].set(0.0)
+        c2=c2.at[-1].set(0.0)
+       #
 
         return frozendict({
             **nodes,
@@ -990,6 +1202,7 @@ def mesh_geometry_fn(graph):
             "curvature": jnp.where(node_mask, curvature, nodes["curvature"]),
             "c2": jnp.where(node_mask, c2, nodes["c2"]),
             "energy": jnp.where(node_mask, energy, nodes["energy"]),
+            "energy_ext":jnp.where(node_mask, energy_ext, nodes["energy_ext"])
         })
 
     def update_global_fn(nodes, edges, faces, globals_):
@@ -999,13 +1212,11 @@ def mesh_geometry_fn(graph):
         curvature = nodes["curvature"]
         c2 = nodes["c2"]
 
-        energy=nodes["energy"]+edges["energy"]+faces["energy"]+(volume+globals_["V0"])**2*100
+        energy=nodes["energy"]+edges["energy"]+faces["energy"]+(volume-globals_["V0"])**2*100   + nodes["energy_ext"]
 
 
         return frozendict({
             **globals_,
-            "Rv": jnp.sqrt(1/(4*jnp.pi) * area),
-            "Rf": jnp.sqrt(1/(4*jnp.pi) * areag),
             "curvature": curvature,
             "volume": volume,
             "energy": energy,
@@ -1045,7 +1256,7 @@ def mesh_flip_fn(graph: gn_graph.MeshGraphsTuple,n_node_max,n_edge_max,n_face_ma
     def update_node_fn(nodes, sent_edges, received_edges, globals_):
         # nodes compute minimal rn from incident edges
         rn_min = jnp.minimum(sent_edges["rn_min"], received_edges["rn_min"])
-        return frozendict({**nodes, "rn_min": rn_min})
+        return frozendict({**nodes})
 
     def update_face_fn(faces,face_edges,nodes,senders,receivers, globals_):
 
@@ -2402,8 +2613,8 @@ def mesh_flip_fn(graph: gn_graph.MeshGraphsTuple,n_node_max,n_edge_max,n_face_ma
 
 
         lijs = edges["lij"] / globals_["l0"]
-        energy = tether_potential_trimem(lijs, lc1=0.6, lc0=1.4, r=2)
-        #energy=tether_potential(lijs, l0=globals_["l0"], kT=globals_["kT"], kTh=globals_["kTh"])
+        #energy = tether_potential_trimem(lijs, lc1=0.6, lc0=1.4, r=2)
+        energy=tether_potential(lijs, l0=globals_["l0"], kT=globals_["kT"], kTh=globals_["kTh"])
         #energy = energy * globals_["kT"] + (lijs - 1) ** 2 * 0.5*globals_["kTh"]*1e-2
 
         return frozendict({
@@ -2437,6 +2648,8 @@ def mesh_flip_fn(graph: gn_graph.MeshGraphsTuple,n_node_max,n_edge_max,n_face_ma
             "curvature": jnp.where(node_mask, curvature, nodes["curvature"]),
             "c2": jnp.where(node_mask, c2, nodes["c2"]),
             "energy": jnp.where(node_mask, energy, nodes["energy"]),
+            "energy_ext":nodes["energy_ext"],
+
         })
 
     def metropolis_fn(
@@ -2756,7 +2969,7 @@ def brownian_dynamics_integrator(
 
     dr=(dposition_dt / gamma) * time_step
 
-    max_val = 0.05  # desired max |dr[i]|
+    max_val = 0.025  # desired max |dr[i]|
 
     norm = jnp.linalg.norm(dr, axis=1, keepdims=True)
     scale = jnp.minimum(1.0, max_val / (norm + 1e-12))
@@ -2794,10 +3007,10 @@ def write_mesh_vtk(meshgraph, filename, binary=False):
     No need for faces['vertices'].
     """
 
-    pos          = np.asarray(meshgraph.nodes["position"])      # (N,3)
-    face_edges   = np.asarray(meshgraph.faces["edges"])         # (F,3)
-    senders      = np.asarray(meshgraph.senders)       # (E,)
-    receivers    = np.asarray(meshgraph.receivers)     # (E,)
+    pos          = np.asarray(meshgraph.nodes["position"][:-1,:])      # (N,3)
+    face_edges   = np.asarray(meshgraph.faces["edges"][:-1,:])         # (F,3)
+    senders      = np.asarray(meshgraph.senders[:-1])       # (E,)
+    receivers    = np.asarray(meshgraph.receivers[:-1])     # (E,)
 
     # ---- reconstruct vertex triplets ----
     F = face_edges.shape[0]
@@ -2879,13 +3092,14 @@ def write_mesh_vtk(meshgraph, filename, binary=False):
 ### INTEGRATOR PARAMETERS
 
 next_key=jax.random.PRNGKey(42)
-time_step=1.e-6
-temperature=0.
+key=jax.random.PRNGKey(44)
+time_step=0.5e-5
+temperature=0.05
 gamma0=1.0
 
 
 ### BUILD INITIAL STATE FROM TRIMESH
-mesh = trimesh.creation.icosphere(subdivisions=2, radius=1.0)
+mesh = trimesh.creation.icosphere(subdivisions=3, radius=1.0)
 
 #mesh = trimesh.creation.icosahedron(subdivisions=5, radius=1.0)
 
@@ -2908,7 +3122,7 @@ energy, returned_graph, next_key, returned_graph2 = step_fn_graph(meshgraph, tim
 
 print("TYPE next_position in graph nodes:", type(returned_graph.nodes["position"]), returned_graph.nodes["position"].dtype)
 print("SHAPE next_position in graph nodes:", returned_graph.nodes["position"].shape)
-print("Example next_position[0]:", returned_graph.nodes["position"][0])
+print("Example next_position[1]:", returned_graph.nodes["position"][1])
 
 # Also call integrator directly to inspect next_position:
 static_graph = get_static_graph(meshgraph)
@@ -2942,7 +3156,7 @@ def step_geometry(carry, _):
 globals_=meshgraph.globals
 
 globals_=frozendict({**meshgraph.globals,
-                     "V0":meshgraph.globals["volume"]*1,
+                     "V0":meshgraph.globals["volume"]*0.33,
                      "A0":jnp.mean(meshgraph.faces["area"]*6),
                      "l0":jnp.mean(meshgraph.edges['lij']),
                      "Av0":jnp.mean(meshgraph.nodes["area"]),
@@ -2984,183 +3198,137 @@ def step_topology(carry, _):
 #meshgraph, _ = jax.lax.scan(step, meshgraph, xs=None, length=10000)
 for i in range(0):
     meshgraph = mesh_flip_jitted_static(meshgraph)#,n_node_max_static,n_edge_max_static)
-    flip_site_proc.append(meshgraph.nodes["flip_site"].sum())
+   # flip_site_proc.append(meshgraph.nodes["flip_site"].sum())
 
 
 
 s0=meshgraph.senders
 fs0=meshgraph.face_senders
-dosteps=10000
+dosteps=1000
 accep=0
 #write_mesh_vtk(meshgraph, f"mesh_00000.vtu")
 nr=1
 i=0
 write_mesh_vtk(meshgraph, f"mesh_{i:05d}.vtk",binary=False)
-for i in range(dosteps):
-    for j in range(100):
-
-       _, _, key, meshgraph = step_fn_graph(meshgraph, time_step, gamma0, temperature, next_key)
-       next_key, key = jax.random.split(key)
-       if j % 5==0:
-      # for k in range(1):
-           meshgraph = mesh_flip_jitted_static(meshgraph)
-       # boolean condition per edge
-         #  ok = (meshgraph.face_senders == fs0) | (meshgraph.face_receivers == fs0)
-
-            # indices where condition fails
-         #  bad_idx = jnp.nonzero(~ok, size=ok.size, fill_value=-1)[0]
-
-            # count real failures
-         #  n_bad = jnp.sum(~ok)
-
-         #  if n_bad > 0:
-         #      print("error NR:", nr )
-         #      print("Mismatch at indices:", bad_idx[:n_bad])
-         #      print("s0 values:", s0[bad_idx[:n_bad]])
-         #      print("senders:", meshgraph.senders[bad_idx[:n_bad]])
-         #      print("receivers:", meshgraph.receivers[bad_idx[:n_bad]])
-         #      print("face senders:", meshgraph.face_senders[bad_idx[:n_bad]])
-         #      print("face receivers:", meshgraph.face_receivers[bad_idx[:n_bad]])
-         #      fs0=meshgraph.face_senders
-         #      nr+=1
-
-              # raise AssertionError(f"{n_bad} edges violate sender/receiver invariant")
-         #  meshgraph = mesh_geometry_jitted(meshgraph)
-
-           accep+=meshgraph.globals["flips_acc"]
-
-
-
-    #meshgraph, _ = jax.lax.scan(step_topology, meshgraph, xs=None, length=dosteps_10)
-    #globals_=frozendict({**meshgraph.globals,"V0":0.999*meshgraph.globals["V0"]})
-    #meshgraph._replace(globals=globals_)
-    if i % 1 == 0:
-        assert jnp.all(meshgraph.face_senders != meshgraph.face_receivers)
-        if i==250:
-            plot_primal_dual_minimal(meshgraph)#print("selected edges per: ",meshgraph.globals["flips_per"]," accepted proposed flips per:",meshgraph.globals["flips_acc"])
-        print("selected edges per: ",meshgraph.globals["flips_per"]," accepted proposed flips per:",meshgraph.globals["flips_acc"]," flip_edges_per: ",meshgraph.globals["flip_edge_per"])
-
-        print(f"E_b:{meshgraph.globals["E_b"]}, E_a:{meshgraph.globals["E_a"]}")
-        write_mesh_vtk(meshgraph, f"mesh_{i+1:05d}.vtk",binary=False)
+print(sorted(meshgraph.nodes.keys()))
 
 
 
 
-print("total accepted: ",accep)
-
-
-
-
-dosteps_geom=0
-
-#plot_mesh_fast(meshgraph)
-
-
-t4=time.time()
-for i in range(dosteps_geom):
-
-    meshgraph=mesh_geometry_jitted(meshgraph)
-t5=time.time()
-
-
-
-#print(f"ERROR: {jnp.sum(meshgraph_save.nodes["position"]-meshgraph.nodes["position"],axis=1)}")
-#print(f"time integration per step: {(t4-t3)/(dosteps+1)*1}")
-#print(f"old mesh:\nvertices:{meshgraph.faces["vertices"]},edges:{meshgraph.faces["edges"]}")
-
-
-
-#print(meshgraph.globals["rejected"])
-#plot_meshgraph_3d(meshgraph)
-#plot_primal_dual_minimal(meshgraph)
-#print(f"new mesh:\nvertices:{meshgraph.faces["vertices"]},edges:{meshgraph.faces["edges"]}")
-#ok,result=check_mesh_consistency_edge_centric(meshgraph)
-
-
-#fig,ax=plt.subplots()
-#plt.hist(flip_site_proc)
-#plt.show()
-print(f"percet flipped on average:{np.mean(flip_site_proc)/meshgraph.n_node_max}")
-
-
-dosteps_geom=1
-
-#plot_mesh_fast(meshgraph)
-
-
-t4=time.time()
-for i in range(dosteps_geom):
-
-    meshgraph=mesh_geometry_jitted(meshgraph)
-t5=time.time()
-
-#print(f"calculation for: {(t5-t4)/dosteps_geom*10}")
-
-
-def step(carry, _):
-    new_carry = mesh_geometry_jitted(carry)
-    return new_carry, None
-t4=time.time()
-meshgraph, _ = jax.lax.scan(step, meshgraph, xs=None, length=dosteps_geom)
-t5=time.time()
-print(f"calculation lax: {(t5-t4)/dosteps_geom}")
+looped_sim=True
 
 
 
 
 
-#print(meshgraph.edges)
+if looped_sim==True:
+    for i in range(dosteps):
+        for j in range(100):
+
+           _, _, key, meshgraph = step_fn_graph(meshgraph, time_step, gamma0, temperature, next_key)
+           next_key, key = jax.random.split(key)
+           if j % 5==0:
+          # for k in range(1):
+               meshgraph = mesh_flip_jitted_static(meshgraph)
+           # boolean condition per edge
+             #  ok = (meshgraph.face_senders == fs0) | (meshgraph.face_receivers == fs0)
+
+                # indices where condition fails
+             #  bad_idx = jnp.nonzero(~ok, size=ok.size, fill_value=-1)[0]
+
+                # count real failures
+             #  n_bad = jnp.sum(~ok)
+
+             #  if n_bad > 0:
+             #      print("error NR:", nr )
+             #      print("Mismatch at indices:", bad_idx[:n_bad])
+             #      print("s0 values:", s0[bad_idx[:n_bad]])
+             #      print("senders:", meshgraph.senders[bad_idx[:n_bad]])
+             #      print("receivers:", meshgraph.receivers[bad_idx[:n_bad]])
+             #      print("face senders:", meshgraph.face_senders[bad_idx[:n_bad]])
+             #      print("face receivers:", meshgraph.face_receivers[bad_idx[:n_bad]])
+             #      fs0=meshgraph.face_senders
+             #      nr+=1
+
+                  # raise AssertionError(f"{n_bad} edges violate sender/receiver invariant")
+             #  meshgraph = mesh_geometry_jitted(meshgraph)
+
+               accep+=meshgraph.globals["flips_acc"]
 
 
 
-print(f"compute sphere radius:\nvia vertex area: {meshgraph.globals["Rv"]}\nvia integrated curvature: {meshgraph.globals["curvature"]/(4*jnp.pi)}\nvia mean local curvature: {1/(jnp.mean(meshgraph.nodes["curvature"]/meshgraph.nodes["area"])),} ")
+        #meshgraph, _ = jax.lax.scan(step_topology, meshgraph, xs=None, length=dosteps_10)
+        #globals_=frozendict({**meshgraph.globals,"V0":0.999*meshgraph.globals["V0"]})
+        #meshgraph._replace(globals=globals_)
+        if i % 1 == 0:
+            print(meshgraph.globals["volume"])
+           # assert jnp.all(meshgraph.face_senders != meshgraph.face_receivers)
+            if i==25000:
+                plot_primal_dual_minimal(meshgraph)#print("selected edges per: ",meshgraph.globals["flips_per"]," accepted proposed flips per:",meshgraph.globals["flips_acc"])
+            print("selected edges per: ",meshgraph.globals["flips_per"]," accepted proposed flips per:",meshgraph.globals["flips_acc"]," flip_edges_per: ",meshgraph.globals["flip_edge_per"])
 
-print("Error volume: ", meshgraph.globals["volume"]-meshgraph.globals["V0"])
-print("Error area: ", meshgraph.globals["area"]-meshgraph.globals["A0"])
-print("sum vertex area:", jnp.sum(meshgraph.nodes["area"]))
-print("sphere area:", 4*jnp.pi)
-print("sum volume:", jnp.sum(meshgraph.nodes["volume"]) / 3)
-print("sphere volume:", 4/3*jnp.pi)
-print(f"volume from global: {meshgraph.globals["volume"]}")
-print(f"via volume: {(meshgraph.globals["volume"]/(4*jnp.pi/3))**(1/3)}")
+            print(f"E_b:{meshgraph.globals["E_b"]}, E_a:{meshgraph.globals["E_a"]}")
+            write_mesh_vtk(meshgraph, f"mesh_{i+1:05d}.vtk",binary=False)
+
+print(sorted(meshgraph.nodes.keys()))
+def canonicalize_graph(mg):
+    return mg._replace(nodes=mg.nodes)
+
+from jax import lax
+if looped_sim==False:
 
 
 
-edges_num = meshgraph.edges
-edges_topo = meshgraph.edges_topo
+    def inner_step(carry, j):
+        meshgraph, key = carry
 
-# 1) face-local totals (responsible-edge contributions)
-sum_face_local = float(jnp.sum(edges_num["area_face_local"]))
-n_nonzero_face_local = int(jnp.sum(edges_num["area_face_local"] > 1e-12))
+        # advance dynamics
+        _, _, key, meshgraph = step_fn_graph(
+            meshgraph,
+            time_step,
+            gamma0,
+            temperature,
+            key,
+        )
 
-# 2) sum of (unscaled) cross-face magnitudes (sanity)
-sum_cross_norm = float(jnp.sum(jnp.linalg.norm(edges_num["cross_face_local"], axis=1)))
+        # split key for next iteration
+        key, _ = jax.random.split(key)
 
-# 3) edges area summary and relation to node areas
-sum_edges_area = float(jnp.sum(edges_num["area"]))
-sum_nodes_area = float(jnp.sum(meshgraph.nodes["area"]))
+        # flip every inc_flip steps
+        do_flip = (j % 5) == 0
 
-# 4) expected totals
-expected_area = float(4.0 * jnp.pi)
-expected_volume = float(4.0/3.0 * jnp.pi)
+       # meshgraph = lax.cond(
+       #     do_flip,
+       #     lambda mg: mesh_flip_jitted_static(mg),
+       #     lambda mg: mg,
+       #     meshgraph,
+       # )
 
-# 5) counts of responsible flags (should equal number of faces)
-if edges_topo is not None:
-    # count how many faces each edge claims (sum of booleans over edges) but we want per-face check
-    count_compute_fs = int(jnp.sum(edges_topo["compute_face_senders"]))
-    count_compute_fr = int(jnp.sum(edges_topo["compute_face_receivers"]))
-else:
-    count_compute_fs = count_compute_fr = None
+        meshgraph = lax.cond(
+            do_flip,
+            mesh_flip_jitted_static,
+            canonicalize_graph,
+            meshgraph,
+        )
 
-print("=== Diagnostics ===")
-print("expected total face area (4π):", expected_area)
-print("sum_face_local (sum of A_f on responsible edges):", sum_face_local)
-print("n_nonzero_face_local:", n_nonzero_face_local)
-print("count_compute_face_senders:", count_compute_fs, " count_compute_face_receivers:", count_compute_fr," total (should be faces):", count_compute_fr+count_compute_fs)
-print("sum_cross_norm (sanity):", sum_cross_norm)
-print("--- edges/nodes area ---")
-print("sum_edges_area (sum edges['area']):", sum_edges_area)
-print("sum_nodes_area (sum nodes['area']):", sum_nodes_area)
-print("sum_nodes_area / expected_area:", sum_nodes_area / expected_area)
-print("sum_edges_area * 2 (should equal sum_nodes_area):", sum_edges_area * 2.0)
-#print(np.mean(meshgraph.faces["area"]))
+        return (meshgraph, key), None
+
+
+    def run_inner_block(meshgraph, key,n_inner=1000):
+        (meshgraph, key), _ = lax.scan(
+            inner_step,
+            (meshgraph, key),
+            jnp.arange(n_inner),
+        )
+        return meshgraph, key
+
+    for i in range(100):
+        meshgraph,key = run_inner_block(meshgraph,key)
+        write_mesh_vtk(meshgraph, f"mesh_{i + 1:05d}.vtk", binary=False)
+
+
+
+
+
+
+
