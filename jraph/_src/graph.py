@@ -123,27 +123,32 @@ class MeshGraphsTuple(NamedTuple):
 
   nodes: Optional[ArrayTree]
   edges: Optional[ArrayTree]
-
   faces: Optional[ArrayTree]
+  globals: Optional[ArrayTree]
+
   receivers: Optional[jnp.ndarray]  # with integer dtype
   senders: Optional[jnp.ndarray]  # with integer dtype
-  face_receivers: Optional[jnp.ndarray]
+
+  face_receivers: Optional[jnp.ndarray]  # dual adjacency (face-face)
   face_senders: Optional[jnp.ndarray]
-  #face_receivers_prev: Optional[jnp.ndarray]
-  #face_receivers_next: Optional[jnp.ndarray]
-  #face_senders_prev: Optional[jnp.ndarray]
-  #face_senders_prev: Optional[jnp.ndarray]
-  face_vertices: Optional[jnp.ndarray]
-  #face_edges: Optional[jnp.ndarray]
-  #edge_face_index: Optional[jnp.ndarray]
-  globals: Optional[ArrayTree]
+
+  face_edges: Optional[jnp.ndarray]  # unoriented (but cyclically ordered) edges of each face
+
+  node_neighbors: Optional[jnp.ndarray]   # 1-ring of each vertex (fs. padded with -1)
+
+  node_mask:Optional[jnp.ndarray]  #computational mask for parallel operations (needs to be at least n_*_max=n_*+1 (last element always 0 for dummy index -1 !!!!! CRUCIAL )
+  edge_mask:Optional[jnp.ndarray]
+  face_mask:Optional[jnp.ndarray]
+
   n_node: jnp.ndarray  # with integer dtype
   n_edge: jnp.ndarray  # with integer dtype
   n_face: jnp.ndarray
-  rng_key: Optional[jnp.ndarray]
+
   n_node_max : int
   n_edge_max: int
   n_face_max:int
+
+  rng_key: Optional[jnp.ndarray]
 
   # -------------- Pickling support --------------
 

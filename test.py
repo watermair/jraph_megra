@@ -717,9 +717,9 @@ def build_meshgraph_from_trimesh(mesh):
                                "A0":4*jnp.pi/n_faces,
                                "Av0":4*jnp.pi/n_nodes,
                                "C0":0.0,
-                               "kA":5.0,
+                               "kA":10.0,
                                "kV":0,
-                               "kT":5.,
+                               "kT":10.,
                                "kTh":1.,
                                "kB":30,
                                "energy":0.0,
@@ -755,12 +755,12 @@ def build_meshgraph_from_trimesh(mesh):
             receivers,
             face_senders,
             face_receivers,
-            face_vertices,
+            face_edges,
             globals_dict,
     ):
         n_nodes = vertices.shape[0]
         n_edges = senders.shape[0]
-        n_faces = face_vertices.shape[0]
+        n_faces = face_edges.shape[0]
 
         # ------------------------------------------------------------------
         # padded sizes
@@ -779,6 +779,9 @@ def build_meshgraph_from_trimesh(mesh):
         node_mask = pad_last(jnp.ones((n_nodes,), dtype=jnp.int32))
         edge_mask = pad_last(jnp.ones((n_edges,), dtype=jnp.int32))
         face_mask = pad_last(jnp.ones((n_faces,), dtype=jnp.int32))
+
+
+
 
         # ------------------------------------------------------------------
         # nodes
@@ -818,9 +821,12 @@ def build_meshgraph_from_trimesh(mesh):
         # ------------------------------------------------------------------
         # faces
         # ------------------------------------------------------------------
+
+
+
         faces_dict = frozendict({
             **faces_dict,
-            "vertices": pad_last(jnp.asarray(face_vertices)),
+            #"vertices": pad_last(jnp.asarray(face_vertices)),
             "edges": pad_last(jnp.asarray(face_edges)).at[-1,:].set(-1),
             "edge_orientation": pad_last(jnp.asarray(face_edge_orientation)),
 
@@ -839,12 +845,15 @@ def build_meshgraph_from_trimesh(mesh):
         receivers = pad_last(jnp.asarray(receivers))
         face_senders = pad_last(jnp.asarray(face_senders))
         face_receivers = pad_last(jnp.asarray(face_receivers))
-        face_vertices = pad_last(jnp.asarray(face_vertices))
+
+        face_edges = pad_last(jnp.asarray(face_edges))
+     #   face_vertices = pad_last(jnp.asarray(face_vertices))
 
         senders=senders.at[-1].set(-1)
         receivers=receivers.at[-1].set(-1)
         face_senders=face_senders.at[-1].set(-1)
         face_receivers=face_receivers.at[-1].set(-1)
+        face_edges=face_edges.at[-1,:].set(-1)
 
 
         # ------------------------------------------------------------------
@@ -854,15 +863,21 @@ def build_meshgraph_from_trimesh(mesh):
             "nodes": nodes,
             "edges": edges,
             "faces": faces_dict,
+            "globals": globals_dict,
 
             "senders": senders,
             "receivers": receivers,
 
             "face_senders": face_senders,
             "face_receivers": face_receivers,
-            "face_vertices": face_vertices,
 
-            "globals": globals_dict,
+            "face_edges": face_edges,
+
+            "node_neighbors": node_neighbors,
+
+            "node_mask": node_mask,
+            "edge_mask": edge_mask,
+            "face_mask": face_mask,
 
             "n_node": jnp.asarray([n_nodes]),
             "n_edge": jnp.asarray([n_edges]),
@@ -955,7 +970,7 @@ def build_meshgraph_from_trimesh(mesh):
             receivers,
             face_senders,
             face_receivers,
-            face_vertices,
+            face_edges,
             globals_dict)
 
 
@@ -1061,8 +1076,8 @@ def tether_potential(l, l0=1, kT=5.0, kTh=20.0):
 
 def mesh_geometry_fn(graph):
 
-    def update_edge_fn(edges, senders, receivers, globals_):
-        edge_mask=edges["mask"]
+    def update_edge_fn(edges, senders, receivers, globals_,edge_mask):
+       # edge_mask=edges["mask"]
         pos_s = senders["position"]
         pos_r = receivers["position"]
 
@@ -1077,8 +1092,8 @@ def mesh_geometry_fn(graph):
             "lij": jnp.where(edge_mask, lij, edges["lij"]),
         })
 
-    def update_face_fn(faces, edges, sign, globals_):
-        face_mask=faces["mask"]
+    def update_face_fn(faces, edges, sign, globals_,face_mask):
+        #face_mask=faces["mask"]
 
 
         uij = edges["uij"] * sign[:, :, None]
@@ -1099,8 +1114,8 @@ def mesh_geometry_fn(graph):
             "energy": jnp.where(face_mask, energy, faces["energy"]),
         })
 
-    def update_edge_from_face_fn(edges, face_senders, face_receivers, globals_):
-        edge_mask=edges["mask"]
+    def update_edge_from_face_fn(edges, face_senders, face_receivers, globals_,edge_mask):
+
 
         phi, weight = edge_dihedral_and_weight(
             face_senders["normal"],
@@ -1130,7 +1145,7 @@ def mesh_geometry_fn(graph):
             "energy": jnp.where(edge_mask, energy, edges["energy"]),
         })
 
-    def update_node_fn(nodes, sent_edges, received_edges, globals_):
+    def update_node_fn(nodes, sent_edges, received_edges, globals_,node_mask):
         node_mask=nodes["mask"]
 
         area, normal, volume, curvature, c2 = node_geometry(
@@ -1143,7 +1158,7 @@ def mesh_geometry_fn(graph):
         #sel.at[0].set(1)
         #pull=jnp.where(sel,-50.0*nodes["position"][jnp.arange((nodes["position"].shape[0])),0],jnp.zeros((nodes["position"].shape[0],)))
 
-        def gravity(position, G=1.0):
+        def gravity(position, G=0.0):
             pos_z = position[:, 2]
             return G * pos_z
 
@@ -1151,7 +1166,7 @@ def mesh_geometry_fn(graph):
                 x,  # (3,) particle position
                 z0=-1.2,
                 sigma=0.1,  # effective particle radius
-                epsilon=0.5,  # wall strength
+                epsilon=0.0,  # wall strength
         ):
             """
             WCA hard wall at z = 0.
@@ -3008,7 +3023,7 @@ def write_mesh_vtk(meshgraph, filename, binary=False):
     """
 
     pos          = np.asarray(meshgraph.nodes["position"][:-1,:])      # (N,3)
-    face_edges   = np.asarray(meshgraph.faces["edges"][:-1,:])         # (F,3)
+    face_edges   = np.asarray(meshgraph.face_edges[:-1,:])         # (F,3)
     senders      = np.asarray(meshgraph.senders[:-1])       # (E,)
     receivers    = np.asarray(meshgraph.receivers[:-1])     # (E,)
 
@@ -3122,7 +3137,9 @@ energy, returned_graph, next_key, returned_graph2 = step_fn_graph(meshgraph, tim
 
 print("TYPE next_position in graph nodes:", type(returned_graph.nodes["position"]), returned_graph.nodes["position"].dtype)
 print("SHAPE next_position in graph nodes:", returned_graph.nodes["position"].shape)
+print("Example next_position[0]:", returned_graph.nodes["position"][0])
 print("Example next_position[1]:", returned_graph.nodes["position"][1])
+print("Example next_position[-1]:", returned_graph.nodes["position"][-1])
 
 # Also call integrator directly to inspect next_position:
 static_graph = get_static_graph(meshgraph)
@@ -3156,7 +3173,7 @@ def step_geometry(carry, _):
 globals_=meshgraph.globals
 
 globals_=frozendict({**meshgraph.globals,
-                     "V0":meshgraph.globals["volume"]*0.33,
+                     "V0":meshgraph.globals["volume"]*0.75,
                      "A0":jnp.mean(meshgraph.faces["area"]*6),
                      "l0":jnp.mean(meshgraph.edges['lij']),
                      "Av0":jnp.mean(meshgraph.nodes["area"]),
@@ -3204,7 +3221,7 @@ for i in range(0):
 
 s0=meshgraph.senders
 fs0=meshgraph.face_senders
-dosteps=1000
+dosteps=10000
 accep=0
 #write_mesh_vtk(meshgraph, f"mesh_00000.vtu")
 nr=1
