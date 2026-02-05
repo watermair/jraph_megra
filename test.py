@@ -714,14 +714,15 @@ def build_meshgraph_from_trimesh(mesh):
 
     globals_dict = frozendict({"l0":jnp.mean(jnp.linalg.norm(vertices[senders]-vertices[receivers],axis=1)),
                                "V0":4*jnp.pi/3.0,
+                               "Atot0":4*jnp.pi,
                                "A0":4*jnp.pi/n_faces,
                                "Av0":4*jnp.pi/n_nodes,
                                "C0":0.0,
-                               "kA":10.0,
+                               "kA":15.,
                                "kV":0,
-                               "kT":10.,
-                               "kTh":1.,
-                               "kB":30,
+                               "kT":10.0,
+                               "kTh":2.0,
+                               "kB":20.,
                                "energy":0.0,
                                "area":0.0,
                                "volume":0.0,
@@ -1129,12 +1130,13 @@ def mesh_geometry_fn(graph):
         lijs = edges["lij"] / globals_["l0"]
 
         energy = tether_potential(lijs, l0=globals_["l0"], kT=globals_["kT"], kTh=globals_["kTh"])
+        #energy = tether_potential_trimem(lijs, lc1=0.5, lc0=1.5, r=1)
 
         area=area.at[-1].set(0.0)
         normal=normal.at[-1,:].set(0.0)
         weight=weight.at[-1].set(0.0)
         energy=energy.at[-1].set(0.0)
-        #energy = tether_potential_trimem(lijs, lc1=0.6, lc0=1.4, r=2)
+        #
        # energy = energy * globals_["kT"] + (lijs - 1) ** 2 * 0.5*globals_["kTh"]*1e-2
 
         return frozendict({
@@ -1190,10 +1192,11 @@ def mesh_geometry_fn(graph):
 
         gravity = gravity(nodes["position"])
         floor = wca_wall_energy(nodes["position"])
+        bending = 2*globals_["kB"]*c2/area#*globals_["Av0"]
 
         energy=(-globals_["kV"]*volume
-        +2*globals_["kB"]*c2/area*globals_["Av0"]
-        +(area/globals_["Av0"]-1)**2*globals_["kA"])
+        +bending )
+       # +(area/globals_["Av0"]-1)**2*globals_["kA"])
 
         energy_ext= gravity +floor               # external potential contributions invariant under flipping
              #   )
@@ -1215,6 +1218,7 @@ def mesh_geometry_fn(graph):
             "normal": jnp.where(node_mask[:, None], normal, nodes["normal"]),
             "volume": jnp.where(node_mask, volume, nodes["volume"]),
             "curvature": jnp.where(node_mask, curvature, nodes["curvature"]),
+
             "c2": jnp.where(node_mask, c2, nodes["c2"]),
             "energy": jnp.where(node_mask, energy, nodes["energy"]),
             "energy_ext":jnp.where(node_mask, energy_ext, nodes["energy_ext"])
@@ -1227,7 +1231,7 @@ def mesh_geometry_fn(graph):
         curvature = nodes["curvature"]
         c2 = nodes["c2"]
 
-        energy=nodes["energy"]+edges["energy"]+faces["energy"]+(volume-globals_["V0"])**2*100   + nodes["energy_ext"]
+        energy=nodes["energy"]+edges["energy"]+faces["energy"]+(volume/globals_["V0"]-1)**2*1000000+(area/globals_["Atot0"]-1)**2*1000000   + nodes["energy_ext"]
 
 
         return frozendict({
@@ -2628,7 +2632,7 @@ def mesh_flip_fn(graph: gn_graph.MeshGraphsTuple,n_node_max,n_edge_max,n_face_ma
 
 
         lijs = edges["lij"] / globals_["l0"]
-        #energy = tether_potential_trimem(lijs, lc1=0.6, lc0=1.4, r=2)
+        #energy = tether_potential_trimem(lijs, lc1=0.5, lc0=1.5, r=1)
         energy=tether_potential(lijs, l0=globals_["l0"], kT=globals_["kT"], kTh=globals_["kTh"])
         #energy = energy * globals_["kT"] + (lijs - 1) ** 2 * 0.5*globals_["kTh"]*1e-2
 
@@ -2650,8 +2654,8 @@ def mesh_flip_fn(graph: gn_graph.MeshGraphsTuple,n_node_max,n_edge_max,n_face_ma
         )
 
         energy = (-globals_["kV"] * volume
-                  + 2*globals_["kB"] * c2/area*globals_["Av0"]
-                  + (area / globals_["Av0"] - 1) ** 2 * globals_["kA"] )
+                  + 2*globals_["kB"] * c2/area )
+               #   + (area / globals_["Av0"] - 1) ** 2 * globals_["kA"] )
                 #  + (curvature / globals_["C0"] - 1) ** 2 * globals_["kA"]
                   #)
 
@@ -2902,22 +2906,77 @@ def get_state_derivatives_from_hamiltonian_fn(
 
 StateDerivativesFnType = Callable[
     [ jnp.ndarray],
-    Tuple[Tuple[float,jraph.GraphsTuple], Tuple[ jnp.ndarray]]
+    Tuple[Tuple[float,gn_graph.MeshGraphsTuple], Tuple[ jnp.ndarray]]
+]
+SelfRepulsionFnType = Callable[
+    [ jnp.ndarray,jnp.ndarray],
+    Tuple[Tuple[float,gn_graph.MeshGraphsTuple], Tuple[ jnp.ndarray]]
 ]
 
 
 
 # Modification for Verlet
 LangevinIntegratorType = Callable[
-    [jnp.ndarray,  float, StateDerivativesFnType,float,float,jax.Array],
-     Tuple[jnp.ndarray, jax.Array,gn_graph.MeshGraphsTuple]
+    [np.ndarray, float, StateDerivativesFnType,float,float,jax.Array],
+     Tuple[np.ndarray, jax.Array,gn_graph.MeshGraphsTuple]
 ]
+
+
+from jax_md import partition, space, energy
+import jax.numpy as jnp
+
+displacement_fn, shift_fn = space.free()
+
+neighbor_fn = partition.neighbor_list(
+    displacement_fn,
+    box=0.0,
+    box_size=None,
+    r_cutoff=0.1,
+    capacity_multiplier=1.5
+)
+
+
+
+
+def is_mesh_neighbor(i, j, mesh_nbrs):
+    # j: (...,)
+    nbrs_i = mesh_nbrs[i]              # (K,)
+    return jnp.any(j[..., None] == nbrs_i, axis=-1)
+
+def lj_energy(R, nbrs,simga=0.05):
+    idx_i = jnp.arange(R.shape[0])[:, None]
+    idx_j = nbrs.idx                   # (N, max_nbrs)
+
+    # valid neighbor-list entries
+    valid = idx_j >= 0
+
+    # exclude topological neighbors
+    topo_exclude = is_mesh_neighbor(idx_i, idx_j, mesh_nbrs_padded)
+
+    mask = valid & (~topo_exclude)
+
+    dR = displacement_fn(R[idx_i], R[idx_j])
+    r2 = jnp.sum(dR**2, axis=-1)
+
+    # safe LJ
+    inv_r6 = (sigma**2 / r2)**3
+    lj = 4 * epsilon * (inv_r6**2 - inv_r6)
+
+    return jnp.sum(jnp.where(mask, lj, 0.0))
+
+
+
+
+
+
 
 
 def single_langevin_integration_step(
     graph: gn_graph.GraphsTuple, time_step: float,gamma:float,temperature:float,key:jax.Array,
     integrator_fn: LangevinIntegratorType,
     hamiltonian_from_graph_fn: Callable[[gn_graph.MeshGraphsTuple], gn_graph.MeshGraphsTuple],
+    #self_repulsion_fn,
+
     ) -> Tuple[float, gn_graph.MeshGraphsTuple,jax.Array,gn_graph.MeshGraphsTuple]:
   """Updates a graph state integrating by a single step.
 
@@ -2947,6 +3006,8 @@ def single_langevin_integration_step(
   state_derivatives_fn = get_state_derivatives_from_hamiltonian_fn(
       hamiltonian_fn)
 
+
+
   # Get the current state.
 
   position = get_system_state(graph)
@@ -2968,6 +3029,8 @@ def brownian_dynamics_integrator(
         position: jnp.ndarray,
         time_step: float,
         state_derivatives_fn: StateDerivativesFnType,
+        #self_repulsion_fn: SelfRepulsionFnType,
+
         gamma: float,
         temperature: float,
         rng_key: jax.Array
@@ -2979,20 +3042,30 @@ def brownian_dynamics_integrator(
     sigma = jnp.sqrt(2 * kB * temperature / gamma)
 
     (H, next_graph), (dposition_dt) = state_derivatives_fn(position)
+
+   # dposition_dt=dposition_dt+self_repulsion_fn(position,mesh_neighbours)
+
     rng_key, subkey = jax.random.split(rng_key)
     noise = jax.random.normal(subkey, shape=position.shape)
 
-    dr=(dposition_dt / gamma) * time_step
+    max_val = 0.01  # desired max |dr[i]|
 
-    max_val = 0.025  # desired max |dr[i]|
 
+    dr=(dposition_dt / gamma) * time_step + sigma * jnp.sqrt(time_step) * noise
     norm = jnp.linalg.norm(dr, axis=1, keepdims=True)
     scale = jnp.minimum(1.0, max_val / (norm + 1e-12))
     dr_clipped = dr * scale
 
+    #dr = sigma * jnp.sqrt(time_step) * noise
+    #norm = jnp.linalg.norm(dr, axis=1, keepdims=True)
+    #scale = jnp.minimum(1.0, max_val / (norm + 1e-12))
+   # dr_clipped_noise = dr * scale
 
 
-    next_position = position + dr_clipped + sigma * jnp.sqrt(time_step) * noise
+
+
+
+    next_position = position + dr_clipped #+ dr_clipped_noise
 
     # Momentum is unchanged in overdamped limit
     return next_position, rng_key, next_graph
@@ -3001,12 +3074,6 @@ def brownian_dynamics_integrator(
 
 
 
-step_fn_graph = functools.partial(
-        single_langevin_integration_step,
-        hamiltonian_from_graph_fn=mesh_geometry_fn,
-        integrator_fn=brownian_dynamics_integrator)
-
-step_fn_graph = jax.jit(step_fn_graph)
 
 
 
@@ -3108,28 +3175,33 @@ def write_mesh_vtk(meshgraph, filename, binary=False):
 
 next_key=jax.random.PRNGKey(42)
 key=jax.random.PRNGKey(44)
-time_step=0.5e-5
+time_step=0.25e-5
 temperature=0.05
 gamma0=1.0
 
 
 ### BUILD INITIAL STATE FROM TRIMESH
-mesh = trimesh.creation.icosphere(subdivisions=3, radius=1.0)
+mesh = trimesh.creation.icosphere(subdivisions=4, radius=1.0)
 
 #mesh = trimesh.creation.icosahedron(subdivisions=5, radius=1.0)
-
-
 graph = build_meshgraph_from_trimesh(mesh)
-
-
-
-
-
-
 meshgraph=gn_graph.MeshGraphsTuple(**graph)
 
+R=meshgraph.nodes["position"]
+
+nbrs = neighbor_fn.allocate(R)  # later: nbrs = neighbor_fn.update(R, nbrs)
+energy_fn = jax.jit(lambda R,nbrs: lj_energy(R, nbrs))
+self_repulsion_fn  = jax.jit(jax.grad(energy_fn,argnums=0))
 
 
+
+step_fn_graph = functools.partial(
+        single_langevin_integration_step,
+        hamiltonian_from_graph_fn=mesh_geometry_fn,
+        integrator_fn=brownian_dynamics_integrator,
+        )
+
+step_fn_graph = jax.jit(step_fn_graph)
 
 ###### SETUP INTEGRATOR
 # call directly (no jax.jit)
@@ -3154,6 +3226,37 @@ print("equal? graph.nodes['position'] == next_position_from_integrator:",
 
 
 
+
+def cosine_anneal(start, end, i, nsteps,exp=None):
+    """
+    Smooth cosine annealing from start to end.
+
+    Parameters
+    ----------
+    start : float
+        Initial value
+    end : float
+        Final value
+    i : int
+        Current step (0 <= i < nsteps)
+    nsteps : int
+        Total number of steps
+
+    Returns
+    -------
+    value : float
+    """
+    if nsteps <= 1:
+        return end
+
+    if i>nsteps:
+        return end
+
+    s = i / (nsteps - 1)
+    if exp:
+        s= s**exp
+    return end + 0.5 * (start - end) * (1 + np.cos(np.pi * s))
+
 ### CREATE ENERGY FUNCTION AND INITIALIZE GEOMETRY
 mesh_geometry_jitted=jax.jit(mesh_geometry_fn)
 
@@ -3173,8 +3276,9 @@ def step_geometry(carry, _):
 globals_=meshgraph.globals
 
 globals_=frozendict({**meshgraph.globals,
-                     "V0":meshgraph.globals["volume"]*0.75,
+                     "V0":meshgraph.globals["volume"]*1.,
                      "A0":jnp.mean(meshgraph.faces["area"]*6),
+                     "Atot0":meshgraph.globals["area"],
                      "l0":jnp.mean(meshgraph.edges['lij']),
                      "Av0":jnp.mean(meshgraph.nodes["area"]),
                      "C0":jnp.mean(meshgraph.nodes["curvature"])}
@@ -3221,7 +3325,8 @@ for i in range(0):
 
 s0=meshgraph.senders
 fs0=meshgraph.face_senders
-dosteps=10000
+dosteps=2500
+zt_steps=500
 accep=0
 #write_mesh_vtk(meshgraph, f"mesh_00000.vtu")
 nr=1
@@ -3234,17 +3339,49 @@ print(sorted(meshgraph.nodes.keys()))
 
 looped_sim=True
 
+V0_anneal=meshgraph.globals["volume"]
+globals_=frozendict({**meshgraph.globals,
+                     "V0":meshgraph.globals["volume"]*1.}
+                    )
+meshgraph=meshgraph._replace(globals=globals_)
+
+Tstart=1.0
+Tend=0.0
+Texp=0.9
+
+Vstart=1.0
+Vend=0.66
+Vexp=1.0
 
 
 
 
+
+file = open(f'Vend_{Vend}_dosteps_{dosteps}_zt_{zt_steps}.txt','w')
+
+bending=2*meshgraph.globals["kB"]*meshgraph.nodes["c2"]/meshgraph.nodes["area"]
+bs=jnp.sum(bending[0:-1])/(meshgraph.globals["kB"]*8*jnp.pi)
+
+
+file.write(f'{0} {Vstart} {meshgraph.globals["volume"][0]} {meshgraph.globals["area"][0]} {bs}\n')
+t0=time.time()
+#file.write(f'{i} {Vstart} {meshgraph.globals["V0"]} {meshgraph.globals["area"]} {jnp.sum(meshgrap.node_mask*meshgraph.nodes['bending'])}')
 if looped_sim==True:
-    for i in range(dosteps):
-        for j in range(100):
+    for i in range(dosteps+zt_steps):
+        temperature=cosine_anneal(Tstart,Tend,i,dosteps+zt_steps,exp=Texp)
+        Vsc=V0_anneal*cosine_anneal(Vstart,Vend,i,dosteps+zt_steps,exp=Vexp)
+
+        globals_ = frozendict({**meshgraph.globals,
+                               "V0": Vsc}
+                              )
+        meshgraph = meshgraph._replace(globals=globals_)
+
+        for j in range(2500):
+
 
            _, _, key, meshgraph = step_fn_graph(meshgraph, time_step, gamma0, temperature, next_key)
            next_key, key = jax.random.split(key)
-           if j % 5==0:
+           if j % 2==0:
           # for k in range(1):
                meshgraph = mesh_flip_jitted_static(meshgraph)
            # boolean condition per edge
@@ -3278,15 +3415,21 @@ if looped_sim==True:
         #globals_=frozendict({**meshgraph.globals,"V0":0.999*meshgraph.globals["V0"]})
         #meshgraph._replace(globals=globals_)
         if i % 1 == 0:
-            print(meshgraph.globals["volume"])
+            print(f"current V: {meshgraph.globals["volume"]}, V0: {meshgraph.globals["V0"]}")
            # assert jnp.all(meshgraph.face_senders != meshgraph.face_receivers)
             if i==25000:
                 plot_primal_dual_minimal(meshgraph)#print("selected edges per: ",meshgraph.globals["flips_per"]," accepted proposed flips per:",meshgraph.globals["flips_acc"])
-            print("selected edges per: ",meshgraph.globals["flips_per"]," accepted proposed flips per:",meshgraph.globals["flips_acc"]," flip_edges_per: ",meshgraph.globals["flip_edge_per"])
+          #  print("selected edges per: ",meshgraph.globals["flips_per"]," accepted proposed flips per:",meshgraph.globals["flips_acc"]," flip_edges_per: ",meshgraph.globals["flip_edge_per"])
 
-            print(f"E_b:{meshgraph.globals["E_b"]}, E_a:{meshgraph.globals["E_a"]}")
+           # print(f"E_b:{meshgraph.globals["E_b"]}, E_a:{meshgraph.globals["E_a"]}")
             write_mesh_vtk(meshgraph, f"mesh_{i+1:05d}.vtk",binary=False)
-
+            print(f'time elapsed: {time.time()-t0}')
+            bending=2*meshgraph.globals["kB"]*meshgraph.nodes["c2"]/meshgraph.nodes["area"]
+            bs=jnp.sum(bending[0:-1])/(meshgraph.globals["kB"]*8*jnp.pi)
+            print(bs)
+            file.write(
+                f'{i+1} {Vsc[0]} {meshgraph.globals["volume"][0]} {meshgraph.globals["area"][0]} {bs}\n')
+file.close()
 print(sorted(meshgraph.nodes.keys()))
 def canonicalize_graph(mg):
     return mg._replace(nodes=mg.nodes)
